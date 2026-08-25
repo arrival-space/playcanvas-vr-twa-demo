@@ -54,7 +54,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 12;
+        const BUILD = 13;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -441,7 +441,7 @@
                 sessionType = pc.XRTYPE_VR;
                 floor.enabled = true;
                 startXR('timeout');
-            }, 4000);
+            }, 10000);
         }
 
         /// flat fallback: slow orbit so a desktop / 2D launch is not a dead screen
