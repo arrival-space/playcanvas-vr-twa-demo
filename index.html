@@ -48,6 +48,14 @@
         app.setCanvasResolution(pc.RESOLUTION_AUTO);
         window.addEventListener('resize', () => app.resizeCanvas());
 
+        /// ?scale=<n> drives the WebXR framebuffer scale factor. 1.0 is the UA
+        /// default, which is NOT native resolution — the native factor is only
+        /// knowable once a session exists, so the panel reports it and we relaunch
+        /// with that number to actually claim it.
+        const urlParams = new URLSearchParams(location.search);
+        const scaleParam = parseFloat(urlParams.get('scale'));
+        const requestedScale = (isFinite(scaleParam) && scaleParam > 0) ? scaleParam : 1.0;
+
         app.scene.ambientLight = new pc.Color(0.12, 0.14, 0.2);
 
         /// camera lives under a rig so we can move the player without fighting
@@ -156,6 +164,102 @@
             });
         });
 
+        /// ---- diagnostics panel ----
+        /// Quest Browser gives us no devtools socket, so the readout has to live
+        /// in the scene itself: a canvas texture on a quad pinned to the camera.
+        const PANEL_W = 1024;
+        const PANEL_H = 512;
+        const panelCanvas = document.createElement('canvas');
+        panelCanvas.width = PANEL_W;
+        panelCanvas.height = PANEL_H;
+        const pctx = panelCanvas.getContext('2d');
+
+        const panelTex = new pc.Texture(app.graphicsDevice, {
+            width: PANEL_W,
+            height: PANEL_H,
+            format: pc.PIXELFORMAT_RGBA8,
+            mipmaps: false,
+            addressU: pc.ADDRESS_CLAMP_TO_EDGE,
+            addressV: pc.ADDRESS_CLAMP_TO_EDGE
+        });
+        panelTex.setSource(panelCanvas);
+
+        const panelMat = new pc.StandardMaterial();
+        panelMat.diffuse = new pc.Color(0, 0, 0);
+        panelMat.emissiveMap = panelTex;
+        panelMat.emissive = new pc.Color(1, 1, 1);
+        panelMat.useLighting = false;
+        panelMat.update();
+
+        const panel = new pc.Entity('diagnostics');
+        panel.addComponent('render', { type: 'plane', material: panelMat, castShadows: false });
+        panel.setLocalEulerAngles(90, 0, 0);
+        panel.setLocalPosition(0, -0.28, -1.1);
+        panel.setLocalScale(0.72, 1, 0.36);
+        camera.addChild(panel);
+
+        function drawPanel(lines) {
+            pctx.fillStyle = 'rgba(6, 10, 18, 0.94)';
+            pctx.fillRect(0, 0, PANEL_W, PANEL_H);
+            pctx.strokeStyle = '#1a8fe3';
+            pctx.lineWidth = 6;
+            pctx.strokeRect(3, 3, PANEL_W - 6, PANEL_H - 6);
+            pctx.fillStyle = '#e8eef8';
+            pctx.font = '600 34px "Consolas", "Courier New", monospace';
+            pctx.textBaseline = 'top';
+            for (let i = 0; i < lines.length; i++) {
+                pctx.fillText(lines[i], 34, 30 + i * 46);
+            }
+            panelTex.upload();
+        }
+
+        function num(v, digits) {
+            return (typeof v === 'number' && isFinite(v)) ? v.toFixed(digits) : '?';
+        }
+
+        function refreshPanel() {
+            const lines = ['scale req : ' + num(requestedScale, 3)];
+            const s = app.xr.session;
+
+            if (s) {
+                let nativeScale = NaN;
+                try {
+                    nativeScale = window.XRWebGLLayer.getNativeFramebufferScaleFactor(s);
+                } catch (e) { /* not exposed on this UA */ }
+
+                const bl = s.renderState && s.renderState.baseLayer;
+                let viewCount = '?';
+                try { viewCount = app.xr.views.list.length; } catch (e) { /* older api */ }
+
+                lines.push('scale nat : ' + num(nativeScale, 3));
+                lines.push('scale pc  : ' + num(app.xr.framebufferScaleFactor, 3));
+                lines.push('framebuf  : ' + (bl ? bl.framebufferWidth + ' x ' + bl.framebufferHeight : 'n/a'));
+                lines.push('views     : ' + viewCount);
+                lines.push('refresh   : ' + (s.frameRate ? num(s.frameRate, 0) + ' Hz' : 'n/a'));
+                lines.push('rates     : ' + (s.supportedFrameRates ?
+                    Array.from(s.supportedFrameRates).join(' ') : 'n/a'));
+            } else {
+                lines.push('(no xr session yet)');
+            }
+
+            lines.push('fps       : ' + num(fps, 1));
+            drawPanel(lines);
+        }
+
+        let fps = 0;
+        let frameCount = 0;
+        let frameAccum = 0;
+        app.on('update', function (dt) {
+            frameCount++;
+            frameAccum += dt;
+            if (frameAccum >= 0.5) {
+                fps = frameCount / frameAccum;
+                frameCount = 0;
+                frameAccum = 0;
+                refreshPanel();
+            }
+        });
+
         /// ---- session plumbing ----
         const hud = document.getElementById('hud');
         const btn = document.getElementById('enter');
@@ -168,8 +272,9 @@
         function startXR(reason) {
             if (sessionRequested || app.xr.active) return;
             sessionRequested = true;
-            console.log('[pcvr] requesting session (' + reason + ')');
+            console.log('[pcvr] requesting session (' + reason + ') scale=' + requestedScale);
             app.xr.start(camera.camera, pc.XRTYPE_VR, pc.XRSPACE_LOCALFLOOR, {
+                framebufferScaleFactor: requestedScale,
                 callback: function (err) {
                     if (err) {
                         /// let a later trigger (the button, or availability
