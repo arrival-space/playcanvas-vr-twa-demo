@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 60;
+        const BUILD = 61;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -448,7 +448,7 @@
                 lastFrameTime = time;
                 /// refresh the depth handle every frame so the composite samples
                 /// the current frame, not whatever the last readback captured
-                if (eyeOn) {
+                if (eyeOn || occOn) {
                     try { refreshDepthInfo(frame); } catch (e) { /* transient */ }
                 }
                 /// the depth texture is opaque: it is only a legal GL object inside
@@ -935,7 +935,7 @@
                 setTimeout(function () {
                     ensureProbes();
                     window.pcvr.occlude(true);
-                }, 1200);
+                }, 800);
             }
             hud.classList.add('hidden');
             /// transparent clear in AR so the real room shows behind the scene
@@ -1604,8 +1604,7 @@
             if (prevScissor) gl.enable(gl.SCISSOR_TEST);
         }
 
-        /// superseded by the geometry occluder above
-        /// app.scene.on('prerender', primeDepth);
+        app.scene.on('prerender', primeDepth);
 
         /// a few probes at arm's-length depths to test the occlusion against
         let probes = null;
@@ -1764,15 +1763,14 @@
             },
             occlude: function (v) {
                 occOn = !!v;
-                /// depth clearing stays ON - the occluder is real geometry now
+                /// Depth clearing stays ON. primeDepth runs at scene 'prerender',
+                /// which is after the clear and before the draws, so the sensor
+                /// depth survives without the eyes fighting over a shared buffer.
                 camera.camera.clearDepthBuffer = true;
-                cloudOn = occOn;
-                if (occOn) {
-                    ensureCloud();
-                    setCloudDepthOnly(true);
-                }
-                if (cloudEntity) cloudEntity.enabled = occOn;
-                return { occlude: occOn, mode: 'geometry', points: cloudCount };
+                /// no CPU path needed at all
+                cloudOn = false;
+                if (cloudEntity) cloudEntity.enabled = false;
+                return { occlude: occOn, mode: 'gpu-zwrite' };
             },
             occluderVisible: function (v) {
                 setCloudDepthOnly(!v);
