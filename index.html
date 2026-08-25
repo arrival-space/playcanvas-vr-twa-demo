@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 52;
+        const BUILD = 53;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1157,6 +1157,8 @@
         let focusDist = 0.55;
         let dwellAmt = 0.82;
         let dwellWidth = 0.13;
+        /// share of the cycle spent on the slow near-field burn
+        let burnFrac = 0.75;
         let sweepTable = null;
 
         function buildSweepTable() {
@@ -1247,7 +1249,17 @@
                 : sweepFixed;
             /// linear in metres, so the bolt travels at a constant real-world
             /// speed and keeps a constant real-world thickness
-            const sliceM = sweepDistLo + (sweepDistHi - sweepDistLo) * phaseToFrac(phase);
+            /// Two explicit stages rather than one blended curve:
+            ///   burnFrac of the cycle creeps from the near plane out to fireDist
+            ///   the remainder accelerates away to the far end as lightning
+            let sliceM;
+            if (phase < burnFrac) {
+                const t = phase / Math.max(0.0001, burnFrac);
+                sliceM = sweepDistLo + (fireDist - sweepDistLo) * (t * t * (3 - 2 * t));
+            } else {
+                const t = (phase - burnFrac) / Math.max(0.0001, 1 - burnFrac);
+                sliceM = fireDist + (sweepDistHi - fireDist) * (t * t);
+            }
             gl.uniform1f(g.uSlice, 0.0);
             gl.uniform1f(g.uBands, sweepBands);
             gl.uniform1f(g.uSharp, sweepSharp);
@@ -1475,6 +1487,10 @@
                 if (isFinite(hi)) sweepDistHi = hi;
                 buildSweepTable();
                 return { metresLo: sweepDistLo, metresHi: sweepDistHi };
+            },
+            burn: function (frac) {
+                if (isFinite(frac)) burnFrac = Math.min(0.95, Math.max(0.05, frac));
+                return { burnFrac: burnFrac, fireDist: fireDist };
             },
             focus: function (m, amount, width) {
                 if (isFinite(m)) focusDist = m;
