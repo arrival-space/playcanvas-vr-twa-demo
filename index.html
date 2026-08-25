@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 28;
+        const BUILD = 29;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -81,7 +81,7 @@
         const depthUsagePref = urlParams.get('dusage') === 'gpu'
             ? pc.XRDEPTHSENSINGUSAGE_GPU : pc.XRDEPTHSENSINGUSAGE_CPU;
         const dscaleParam = parseFloat(urlParams.get('dscale'));
-        const depthScale = isFinite(dscaleParam) ? dscaleParam : 65535.0;
+        const depthScale = isFinite(dscaleParam) ? dscaleParam : 0.001;
         /// XrManager.start() hard-rejects a type whose async isSessionSupported()
         /// has not resolved yet, so availability must be tracked for the type we
         /// actually intend to start — not just immersive-vr.
@@ -662,7 +662,7 @@
                 for (let x = 0; x < DEPTH_W; x++) {
                     const si = s0 + x * 4;
                     const q = src[si] * 256 + src[si + 1];
-                    const d = (q / 65535) * 16;
+                    const d = q * depthScale;
                     const i = (y * DEPTH_W + x) * 4;
                     if (q === 0) {
                         px[i] = 0; px[i + 1] = 180; px[i + 2] = 0;
@@ -682,7 +682,7 @@
             depthTexture.upload();
 
             const ci = ((DEPTH_H >> 1) * DEPTH_W + (DEPTH_W >> 1)) * 4;
-            lastDepthCentre = ((src[ci] * 256 + src[ci + 1]) / 65535) * 16;
+            lastDepthCentre = (src[ci] * 256 + src[ci + 1]) * depthScale;
 
             if (!readLogged) {
                 readLogged = true;
@@ -691,7 +691,9 @@
                     ' valid=' + valid + '/' + (DEPTH_W * DEPTH_H) +
                     ' min=' + (isFinite(minD) ? minD.toFixed(3) : 'n/a') +
                     ' max=' + (isFinite(maxD) ? maxD.toFixed(3) : 'n/a') +
-                    ' centre=' + lastDepthCentre.toFixed(3) + 'm');
+                    ' centre=' + lastDepthCentre.toFixed(3) + 'm' +
+                    ' rawCentre=' + (src[ci] * 256 + src[ci + 1]) +
+                    ' scale=' + depthScale);
             }
         }
 
