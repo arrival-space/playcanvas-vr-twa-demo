@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 57;
+        const BUILD = 58;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -119,6 +119,9 @@
         /// VR is the default: a plain launch must always come up. AR/depth is
         /// opt-in via ?mode=ar so an experiment can never break the base demo.
         const arMode = urlParams.get('mode') !== 'vr';
+        /// ?demo=occlusion turns this into the depth-occlusion experiment:
+        /// no fire overlay, splat loaded, real-world depth writing enabled
+        const demoOcclusion = urlParams.get('demo') === 'occlusion';
         /// panel, controller rays and cubes are diagnostics - off unless ?debug=1
         const showDebug = urlParams.get('debug') === '1';
         /// PIXELFORMAT_DEPTH (unsigned-short) samples as zero through a normal
@@ -927,6 +930,11 @@
         }
 
         app.xr.on('start', function () {
+            if (demoOcclusion) {
+                camera.camera.clearDepthBuffer = false;
+                loadSplat();
+                ensureProbes();
+            }
             hud.classList.add('hidden');
             /// transparent clear in AR so the real room shows behind the scene
             if (app.xr.type === pc.XRTYPE_AR) {
@@ -941,6 +949,12 @@
 
         btn.addEventListener('click', function () { startXR('button'); });
 
+        if (demoOcclusion) {
+            document.querySelector('#hud h1').innerHTML = 'Real-world occlusion,<br />depth-tested';
+            document.getElementById('blurb').innerHTML =
+                'The headset&rsquo;s depth is written into the z-buffer, so virtual content &mdash; '
+                + 'including a <b>gaussian splat</b> &mdash; is hidden by your real hands.';
+        }
         console.log('[pcvr] boot | build=' + BUILD + ' | xr.supported=' + app.xr.supported +
             ' | available=' + app.xr.isAvailable(sessionType));
         document.getElementById('eyebrow').textContent = 'WebXR · Quest 3 · build ' + BUILD;
@@ -1036,7 +1050,7 @@
 
         /// ---- per-eye screen-space depth composite ----
         let eyeProg = null;
-        let eyeOn = true;
+        let eyeOn = !demoOcclusion;
         let eyeAlpha = 0.6;
         /// FIXED range - auto-contrast per frame makes a near object rescale the
         /// whole scene, which reads as the background shifting when a hand appears
@@ -1048,9 +1062,9 @@
         let sweepBands = 4.0;
         let sweepSharp = 260.0;
         let sweepDistLo = 0.15;
-        let sweepDistHi = 6.0;
+        let sweepDistHi = 3.0;
         let sweepEase = 2.0;
-        let fireDist = 0.7;
+        let fireDist = 0.4;
         let fineBands = 45.0;   // rings per metre in the near field (~2cm)
         let edgeAmt = 0.25;
         let shadeAmt = 260.0;
@@ -1458,7 +1472,7 @@
         ///     z_ndc = -p[10] + p[14] / d      (d = metres, right-handed, -Z fwd)
         ///     gl_FragDepth = (z_ndc + 1) * 0.5
         let occProg = null;
-        let occOn = false;
+        let occOn = demoOcclusion;
         let occBias = 0.02;          // metres, pushes real geometry slightly back
 
         function initOccProg() {
