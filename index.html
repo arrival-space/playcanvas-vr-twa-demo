@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 33;
+        const BUILD = 34;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -81,7 +81,7 @@
         const depthUsagePref = urlParams.get('dusage') === 'gpu'
             ? pc.XRDEPTHSENSINGUSAGE_GPU : pc.XRDEPTHSENSINGUSAGE_CPU;
         const dscaleParam = parseFloat(urlParams.get('dscale'));
-        const depthScale = isFinite(dscaleParam) ? dscaleParam : 0.001;
+        const depthScale = isFinite(dscaleParam) ? dscaleParam : (8 / 65535);
         /// XrManager.start() hard-rejects a type whose async isSessionSupported()
         /// has not resolved yet, so availability must be tracked for the type we
         /// actually intend to start — not just immersive-vr.
