@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 43;
+        const BUILD = 44;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1030,6 +1030,13 @@
             const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
             const prevActive = gl.getParameter(gl.ACTIVE_TEXTURE);
 
+            /// PlayCanvas has its own FBO bound at postrender, not the XR layer,
+            /// so target the XR framebuffer explicitly or the draw goes nowhere
+            let xrFb = null;
+            try { xrFb = app.xr.session.renderState.baseLayer.framebuffer; } catch (e) {}
+            const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+            if (xrFb !== undefined) gl.bindFramebuffer(gl.FRAMEBUFFER, xrFb);
+
             gl.bindVertexArray(null);
             gl.useProgram(g.prog);
             gl.disable(gl.DEPTH_TEST);
@@ -1054,6 +1061,7 @@
                 gl.drawArrays(gl.TRIANGLES, 0, 3);
             }
 
+            gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
             gl.useProgram(prevProg);
             gl.bindVertexArray(prevVao);
             gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
