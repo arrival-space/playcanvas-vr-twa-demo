@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 34;
+        const BUILD = 35;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -249,7 +249,7 @@
         const panel = new pc.Entity('diagnostics');
         panel.addComponent('render', { type: 'plane', material: panelMat, castShadows: false });
         panel.setLocalEulerAngles(90, 0, 0);
-        panel.setLocalPosition(0, -0.28, -1.1);
+        panel.setLocalPosition(0, -0.30, -0.9);
         panel.setLocalScale(0.72, 1, 0.36);
         camera.addChild(panel);
 
@@ -355,6 +355,9 @@
         let lastHist = 0;
         let lastRawLo = 0;
         let lastRawHi = 0;
+        const depthOverlay = new URLSearchParams(location.search).get('doverlay') !== '0';
+        const dopParam = parseFloat(new URLSearchParams(location.search).get('dop'));
+        const depthOpacity = isFinite(dopParam) ? dopParam : 0.75;
         const allowGpuBlit = true;
 
         function startDepthFrameLoop() {
@@ -507,8 +510,25 @@
             depthPreview = new pc.Entity('depth-preview');
             depthPreview.addComponent('render', { type: 'plane', material: m, castShadows: false });
             depthPreview.setLocalEulerAngles(90, 0, 0);
-            depthPreview.setLocalPosition(0.56, -0.28, -1.1);
-            depthPreview.setLocalScale(0.34, 1, 0.34);
+
+            if (depthOverlay) {
+                /// size the quad to fill the frustum at a fixed distance so it
+                /// reads as a screen-space overlay rather than an object
+                const dist = 1.2;
+                const fovRad = (camera.camera.fov || 60) * Math.PI / 180;
+                const h = 2 * dist * Math.tan(fovRad / 2) * 1.35;
+                const w = h * 1.6;
+                m.blendType = pc.BLEND_NORMAL;
+                m.opacity = depthOpacity;
+                m.depthTest = false;
+                m.depthWrite = false;
+                m.update();
+                depthPreview.setLocalPosition(0, 0, -dist);
+                depthPreview.setLocalScale(w, 1, h);
+            } else {
+                depthPreview.setLocalPosition(0.56, -0.28, -1.1);
+                depthPreview.setLocalScale(0.34, 1, 0.34);
+            }
             camera.addChild(depthPreview);
         }
 
@@ -687,6 +707,8 @@
                     const i = (y * DEPTH_W + x) * 4;
                     if (q === 0) {
                         px[i] = 0; px[i + 1] = 180; px[i + 2] = 0;
+                        px[i + 3] = depthOverlay ? 0 : 255;
+                        continue;
                     } else {
                         valid++;
                         if (d < minD) minD = d;
