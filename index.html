@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 53;
+        const BUILD = 54;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1051,6 +1051,8 @@
         let sweepDistHi = 6.0;
         let sweepEase = 2.0;
         let fireDist = 0.7;
+        let fineBands = 45.0;   // rings per metre in the near field (~2cm)
+        let edgeAmt = 0.9;
 
         function initEyeProg() {
             const gl = app.graphicsDevice.gl;
@@ -1081,6 +1083,9 @@
                 'uniform float uSliceM;\n' +
                 'uniform float uTime;\n' +
                 'uniform float uFireDist;\n' +
+                'uniform float uFineBands;\n' +
+                'uniform float uEdge;\n' +
+                'uniform float uTexel;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
                 'void main() {\n' +
@@ -1101,12 +1106,27 @@
                 '    float invd = (1.0 / uNear) - zz * ((1.0 / uNear) - (1.0 / uFar));\n' +
                 '    float dm = 1.0 / max(invd, 0.0001);\n' +
                 '    float ring = abs(fract(dm * uBands) - 0.5) * 2.0;\n' +
+                /// a hand is only a few cm deep, so the coarse rings barely
+                /// register on it - lay a much finer set over the near field
+                '    float fine = abs(fract(dm * uFineBands) - 0.5) * 2.0;\n' +
+                '    float nearMask = 1.0 - smoothstep(uFireDist * 0.9, uFireDist * 1.8, dm);\n' +
+                /// depth gradient: big local change means a silhouette edge,
+                /// which is what picks out fingers against what is behind them
+                '    float rL = texture(uDepth, vec3(vUv - vec2(uTexel, 0.0), uLayer)).r;\n' +
+                '    float rR = texture(uDepth, vec3(vUv + vec2(uTexel, 0.0), uLayer)).r;\n' +
+                '    float rU = texture(uDepth, vec3(vUv - vec2(0.0, uTexel), uLayer)).r;\n' +
+                '    float rD = texture(uDepth, vec3(vUv + vec2(0.0, uTexel), uLayer)).r;\n' +
+                '    float grad = abs(rR - rL) + abs(rD - rU);\n' +
+                '    float edge = smoothstep(0.0015, 0.010, grad) * uEdge;\n' +
                 '    float contour = smoothstep(0.88, 1.0, ring);\n' +
                 /// a plane sweeping through the depth range
                 '    float dist = dm - uSliceM;\n' +
                 '    float glow = exp(-dist * dist * uSharp);\n' +
                 '    vec3 base = vec3(1.0 - n, n * 0.55, n);\n' +
+                '    float fineC = smoothstep(0.86, 1.0, fine) * nearMask;\n' +
                 '    vec3 col = base * 0.55 + vec3(0.25, 0.55, 0.75) * contour;\n' +
+                '    col += vec3(0.55, 0.75, 0.95) * fineC * 0.55;\n' +
+                '    col += vec3(1.0, 0.95, 0.85) * edge;\n' +
                 /// cyan halo plus a much tighter white-hot core, so the peak
                 /// reads as white lightning rather than saturated cyan
                 '    float core = exp(-dist * dist * uSharp * 8.0);\n' +
@@ -1118,7 +1138,7 @@
                 '    vec3 coreCol = mix(vec3(1.0, 1.0, 1.0), vec3(1.00, 0.88, 0.55), fire);\n' +
                 '    col += haloCol * glow;\n' +
                 '    col += coreCol * core * 1.4;\n' +
-                '    float a = uAlpha * (0.30 + 0.70 * glow + 0.9 * core + 0.35 * contour);\n' +
+                '    float a = uAlpha * (0.30 + 0.70 * glow + 0.9 * core + 0.35 * contour + 0.30 * fineC + 0.55 * edge);\n' +
                 '    fragColor = vec4(col, clamp(a, 0.0, 1.0));\n' +
                 '}\n');
             if (!vs || !fs) return null;
@@ -1145,7 +1165,10 @@
                 uFar: gl.getUniformLocation(prog, 'uFar'),
                 uSliceM: gl.getUniformLocation(prog, 'uSliceM'),
                 uTime: gl.getUniformLocation(prog, 'uTime'),
-                uFireDist: gl.getUniformLocation(prog, 'uFireDist')
+                uFireDist: gl.getUniformLocation(prog, 'uFireDist'),
+                uFineBands: gl.getUniformLocation(prog, 'uFineBands'),
+                uEdge: gl.getUniformLocation(prog, 'uEdge'),
+                uTexel: gl.getUniformLocation(prog, 'uTexel')
             };
             console.log('[pcvr] per-eye composite program ready');
             return eyeProg;
@@ -1268,6 +1291,9 @@
             gl.uniform1f(g.uSliceM, sliceM);
             gl.uniform1f(g.uTime, lastFrameTime * 0.001);
             gl.uniform1f(g.uFireDist, fireDist);
+            gl.uniform1f(g.uFineBands, fineBands);
+            gl.uniform1f(g.uEdge, edgeAmt);
+            gl.uniform1f(g.uTexel, 1.0 / DEPTH_W);
 
             for (let i = 0; i < views.length; i++) {
                 const vp = views[i].viewport;
@@ -1498,6 +1524,11 @@
                 if (isFinite(width)) dwellWidth = width;
                 buildSweepTable();
                 return { focusDist: focusDist, dwell: dwellAmt, width: dwellWidth };
+            },
+            detail: function (bands, edge) {
+                if (isFinite(bands)) fineBands = bands;
+                if (isFinite(edge)) edgeAmt = edge;
+                return { fineBands: fineBands, edge: edgeAmt };
             },
             fire: function (m) {
                 if (isFinite(m)) fireDist = m;
