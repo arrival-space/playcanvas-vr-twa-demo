@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 21;
+        const BUILD = 22;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -317,6 +317,9 @@
         let depthFrameLoopStarted = false;
         let depthLogged = false;
         let depthErrLogged = false;
+        let depthFmtLogged = false;
+        /// ?dsampler=f forces the normalized-float sampler instead of the integer one
+        const useUintSampler = new URLSearchParams(location.search).get('dsampler') !== 'f';
         let lastDepthBlit = 0;
 
         function startDepthFrameLoop() {
@@ -369,16 +372,19 @@
             const fs = compileShader(gl, gl.FRAGMENT_SHADER,
                 '#version 300 es\n' +
                 'precision highp float;\n' +
-                'precision highp usampler2DArray;\n' +
-                'uniform usampler2DArray uDepth;\n' +
+                (useUintSampler
+                    ? 'precision highp usampler2DArray;\nuniform usampler2DArray uDepth;\n'
+                    : 'precision highp sampler2DArray;\nuniform sampler2DArray uDepth;\n') +
                 'uniform int uLayer;\n' +
                 'uniform float uToMeters;\n' +
                 'out vec4 fragColor;\n' +
                 'void main() {\n' +
                 '    ivec3 c = ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer);\n' +
-                '    uint raw = texelFetch(uDepth, c, 0).r;\n' +
-                '    if (raw == 0u) { fragColor = vec4(0.0, 0.7, 0.0, 1.0); return; }\n' +
-                '    float meters = float(raw) * uToMeters;\n' +
+                (useUintSampler
+                    ? '    float rawf = float(texelFetch(uDepth, c, 0).r);\n'
+                    : '    float rawf = texelFetch(uDepth, c, 0).r * 65535.0;\n') +
+                '    if (rawf <= 0.0) { fragColor = vec4(0.0, 0.7, 0.0, 1.0); return; }\n' +
+                '    float meters = rawf * uToMeters;\n' +
                 '    float n = clamp(meters / 4.0, 0.0, 1.0);\n' +
                 '    fragColor = vec4(1.0 - n, n * 0.7, n, 1.0);\n' +
                 '}\n');
@@ -473,11 +479,33 @@
             gl.clearColor(0.0, 0.0, 0.0, 1.0);
             gl.clear(gl.COLOR_BUFFER_BIT);
 
-            gl.activeTexture(gl.TEXTURE0);
+            const UNIT = 15;
+            gl.activeTexture(gl.TEXTURE0 + UNIT);
+            /// a texture unit may not have two different targets bound while it is
+            /// sampled - clear the ones PlayCanvas might be holding here
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.bindTexture(gl.TEXTURE_CUBE_MAP, null);
+            gl.bindTexture(gl.TEXTURE_3D, null);
             gl.bindTexture(gl.TEXTURE_2D_ARRAY, di.texture);
             gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
             gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-            gl.uniform1i(g.uDepth, 0);
+            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_COMPARE_MODE, gl.NONE);
+            gl.uniform1i(g.uDepth, UNIT);
+
+            if (!depthFmtLogged) {
+                depthFmtLogged = true;
+                const IF = gl.getTexLevelParameter(gl.TEXTURE_2D_ARRAY, 0, gl.TEXTURE_INTERNAL_FORMAT);
+                const W = gl.getTexLevelParameter(gl.TEXTURE_2D_ARRAY, 0, gl.TEXTURE_WIDTH);
+                const H = gl.getTexLevelParameter(gl.TEXTURE_2D_ARRAY, 0, gl.TEXTURE_HEIGHT);
+                const D = gl.getTexLevelParameter(gl.TEXTURE_2D_ARRAY, 0, gl.TEXTURE_DEPTH);
+                const RT = gl.getTexLevelParameter(gl.TEXTURE_2D_ARRAY, 0, gl.TEXTURE_RED_TYPE);
+                console.log('[pcvr] depth tex internalFormat=0x' + (IF >>> 0).toString(16) +
+                    ' size=' + W + 'x' + H + 'x' + D +
+                    ' redType=0x' + (RT >>> 0).toString(16) +
+                    ' sampler=' + (useUintSampler ? 'usampler2DArray' : 'sampler2DArray'));
+            }
             gl.uniform1i(g.uLayer, di.imageIndex || 0);
             gl.uniform1f(g.uToMeters, (di.rawValueToMeters || 1) * depthScale);
 
