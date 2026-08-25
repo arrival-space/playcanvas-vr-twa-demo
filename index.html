@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 24;
+        const BUILD = 25;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -346,6 +346,7 @@
         const useUintSampler = new URLSearchParams(location.search).get('dsampler') !== 'f';
         let lastDepthBlit = 0;
         let lastGridSample = null;
+        const allowGpuBlit = new URLSearchParams(location.search).get('dgpu') === '1';
 
         function startDepthFrameLoop() {
             if (depthFrameLoopStarted) return;
@@ -540,6 +541,10 @@
         function blitDepth(frame) {
             const views = app.xr.views;
             if (!views.availableDepth) return;
+
+            /// The raw GL path never produced pixels and dirties the context enough
+            /// to black out PlayCanvas' own rendering, so it is opt-in only now.
+            if (views.depthGpuOptimized && !allowGpuBlit) return;
 
             /// prefer the CPU path whenever the UA actually granted it
             if (!views.depthGpuOptimized) {
