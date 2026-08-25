@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 22;
+        const BUILD = 23;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -487,12 +487,11 @@
             gl.bindTexture(gl.TEXTURE_CUBE_MAP, null);
             gl.bindTexture(gl.TEXTURE_3D, null);
             gl.bindTexture(gl.TEXTURE_2D_ARRAY, di.texture);
-            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_COMPARE_MODE, gl.NONE);
+            /// NB: no texParameteri here. This is a WebXR *opaque* texture and
+            /// changing its parameters is INVALID_OPERATION, which then poisons the
+            /// draw. texelFetch ignores filtering anyway, so we need none of it.
             gl.uniform1i(g.uDepth, UNIT);
+            const bindErr = gl.getError();
 
             if (!depthFmtLogged) {
                 depthFmtLogged = true;
@@ -585,7 +584,8 @@
                 console.log('[pcvr] blit stats | layer=' + (di.imageIndex || 0) +
                     ' toMeters=' + di.rawValueToMeters +
                     ' R[' + rMin + '-' + rMax + '] B[' + bMin + '-' + bMax + ']' +
-                    ' black=' + black + ' green=' + green + ' drawErr=' + drawErr);
+                    ' black=' + black + ' green=' + green +
+                    ' bindErr=' + bindErr + ' drawErr=' + drawErr);
             }
         }
 
