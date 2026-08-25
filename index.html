@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 20;
+        const BUILD = 21;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -316,6 +316,8 @@
         let lastXrFrame = null;
         let depthFrameLoopStarted = false;
         let depthLogged = false;
+        let depthErrLogged = false;
+        let lastDepthBlit = 0;
 
         function startDepthFrameLoop() {
             if (depthFrameLoopStarted) return;
@@ -324,6 +326,20 @@
             depthFrameLoopStarted = true;
             const tick = function (time, frame) {
                 lastXrFrame = frame;
+                /// the depth texture is opaque: it is only a legal GL object inside
+                /// the frame callback that produced it. Doing the pass later (from
+                /// app.on('update')) fails the draw with GL_INVALID_OPERATION.
+                if (time - lastDepthBlit > 200) {
+                    lastDepthBlit = time;
+                    try {
+                        blitDepth(frame);
+                    } catch (e) {
+                        if (!depthErrLogged) {
+                            depthErrLogged = true;
+                            console.log('[pcvr] depth blit threw: ' + e.message);
+                        }
+                    }
+                }
                 if (app.xr.session === session) session.requestAnimationFrame(tick);
             };
             session.requestAnimationFrame(tick);
@@ -411,11 +427,13 @@
         }
 
         function bindDepthPreview() {
+            if (!app.xr.views.availableDepth) return;
+            startDepthFrameLoop();
+        }
+
+        function blitDepth(frame) {
             const views = app.xr.views;
             if (!views.availableDepth) return;
-
-            startDepthFrameLoop();
-            if (!lastXrFrame) return;
 
             const gl = app.graphicsDevice.gl;
             const g = initGlDepth();
@@ -423,7 +441,7 @@
 
             const space = app.xr._referenceSpace;
             if (!space) return;
-            const pose = lastXrFrame.getViewerPose(space);
+            const pose = frame.getViewerPose(space);
             if (!pose || !pose.views.length) return;
 
             if (!xrBinding) xrBinding = new XRWebGLBinding(app.xr.session, gl);
@@ -466,7 +484,9 @@
             gl.bindBuffer(gl.ARRAY_BUFFER, g.vbo);
             gl.enableVertexAttribArray(0);
             gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+            while (gl.getError() !== gl.NO_ERROR) { /* drain pre-existing errors */ }
             gl.drawArrays(gl.TRIANGLES, 0, 3);
+            const drawErr = gl.getError();
 
             if (!depthPixels) depthPixels = new Uint8Array(DEPTH_W * DEPTH_H * 4);
             gl.readPixels(0, 0, DEPTH_W, DEPTH_H, gl.RGBA, gl.UNSIGNED_BYTE, depthPixels);
@@ -537,7 +557,7 @@
                 console.log('[pcvr] blit stats | layer=' + (di.imageIndex || 0) +
                     ' toMeters=' + di.rawValueToMeters +
                     ' R[' + rMin + '-' + rMax + '] B[' + bMin + '-' + bMax + ']' +
-                    ' black=' + black + ' green=' + green + ' glErr=' + gl.getError());
+                    ' black=' + black + ' green=' + green + ' drawErr=' + drawErr);
             }
         }
 
