@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 47;
+        const BUILD = 48;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1047,6 +1047,8 @@
         let sweepFixed = 0.5;
         let sweepBands = 24.0;
         let sweepSharp = 900.0;
+        let sweepRawLo = 0;
+        let sweepRawHi = 65535;
 
         function initEyeProg() {
             const gl = app.graphicsDevice.gl;
@@ -1161,9 +1163,14 @@
             gl.uniform1f(g.uHi, eyeHi);
             gl.uniform1f(g.uAlpha, eyeAlpha);
             /// sweep the slice through the depth range over time
-            const sweep = sweepSpeed > 0
+            /// travel in RAW depth units so the plane genuinely starts at 0 and
+            /// covers everything, rather than starting at whatever raw value the
+            /// contrast window's lower edge happens to sit on
+            const phase = sweepSpeed > 0
                 ? ((lastFrameTime * 0.001 * sweepSpeed) % 1.0)
                 : sweepFixed;
+            const sweepRaw = sweepRawLo + (sweepRawHi - sweepRawLo) * phase;
+            const sweep = (sweepRaw - eyeLo) / Math.max(1, eyeHi - eyeLo);
             gl.uniform1f(g.uSlice, sweep);
             gl.uniform1f(g.uBands, sweepBands);
             gl.uniform1f(g.uSharp, sweepSharp);
@@ -1380,6 +1387,11 @@
                     cloudOn = false;
                 }
                 return { perEye: eyeOn };
+            },
+            sweepRange: function (lo, hi) {
+                if (isFinite(lo)) sweepRawLo = lo;
+                if (isFinite(hi)) sweepRawHi = hi;
+                return { rawLo: sweepRawLo, rawHi: sweepRawHi };
             },
             sweep: function (speed) {
                 if (isFinite(speed)) sweepSpeed = speed;
