@@ -52,6 +52,10 @@
         /// default, which is NOT native resolution — the native factor is only
         /// knowable once a session exists, so the panel reports it and we relaunch
         /// with that number to actually claim it.
+        /// Bumped by hand on every deploy — the only reliable way to tell in the
+        /// headset whether you are looking at a fresh build or a cached one.
+        const BUILD = 7;
+
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
         const requestedScale = (isFinite(scaleParam) && scaleParam > 0) ? scaleParam : 1.0;
@@ -213,11 +217,17 @@
             pctx.strokeStyle = '#1a8fe3';
             pctx.lineWidth = 6;
             pctx.strokeRect(3, 3, PANEL_W - 6, PANEL_H - 6);
-            pctx.fillStyle = '#e8eef8';
-            pctx.font = '600 34px "Consolas", "Courier New", monospace';
             pctx.textBaseline = 'top';
             for (let i = 0; i < lines.length; i++) {
-                pctx.fillText(lines[i], 34, 30 + i * 46);
+                /// build stamp gets accent colour so a stale cache is obvious
+                if (i === 0) {
+                    pctx.fillStyle = '#4cc2ff';
+                    pctx.font = '700 44px "Consolas", "Courier New", monospace';
+                } else {
+                    pctx.fillStyle = '#e8eef8';
+                    pctx.font = '600 34px "Consolas", "Courier New", monospace';
+                }
+                pctx.fillText(lines[i], 34, 24 + i * 44);
             }
             panelTex.upload();
         }
@@ -227,7 +237,11 @@
         }
 
         function refreshPanel() {
-            const lines = ['scale req : ' + num(requestedScale, 3)];
+            const lines = [
+                'BUILD ' + BUILD + '   mode=' + (sessionType === pc.XRTYPE_AR ? 'ar' : 'vr'),
+                '',
+                'scale req : ' + num(requestedScale, 3)
+            ];
             const s = app.xr.session;
 
             if (s) {
@@ -358,8 +372,9 @@
 
         btn.addEventListener('click', function () { startXR('button'); });
 
-        console.log('[pcvr] boot | xr.supported=' + app.xr.supported +
-            ' | available=' + app.xr.isAvailable(pc.XRTYPE_VR));
+        console.log('[pcvr] boot | build=' + BUILD + ' | xr.supported=' + app.xr.supported +
+            ' | available=' + app.xr.isAvailable(sessionType));
+        document.querySelector('#hud h1').textContent = 'PlayCanvas VR Demo — build ' + BUILD;
 
         if (!app.xr.supported) {
             btn.disabled = true;
