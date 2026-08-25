@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 18;
+        const BUILD = 19;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -294,32 +294,192 @@
             drawPanel(lines);
         }
 
-        /// CPU depth: view.getDepth(u, v) returns metres directly, but PlayCanvas
-        /// disables it under gpu-optimized usage. The GPU path hands back a
-        /// PIXELFORMAT_DEPTH texture that samples as exactly zero through a normal
-        /// sampler2D, so we take the CPU path and paint the grid ourselves.
-        const DEPTH_GRID = 64;
+        /// ---- raw WebXR depth, bypassing PlayCanvas ----
+        /// Quest Browser hands GPU depth over as a TEXTURE_2D_ARRAY (one layer per
+        /// eye, selected by imageIndex) in an unsigned-short *integer* format.
+        /// PlayCanvas wraps it as a plain 2D texture, so a sampler2D read returns
+        /// zero. Sample it ourselves with usampler2DArray/texelFetch, blit to an
+        /// RGBA target, read that back, and publish it through the canvas-texture
+        /// path that already works for the readout panel.
+        const DEPTH_W = 320;
+        const DEPTH_H = 320;
+
         let depthPreview = null;
         let depthCanvas = null;
         let depthCtx = null;
         let depthImage = null;
         let depthTexture = null;
+        let depthPixels = null;
+
+        let glDepth = null;
+        let xrBinding = null;
+        let lastXrFrame = null;
+        let depthFrameLoopStarted = false;
+        let depthLogged = false;
+
+        function startDepthFrameLoop() {
+            if (depthFrameLoopStarted) return;
+            const session = app.xr.session;
+            if (!session) return;
+            depthFrameLoopStarted = true;
+            const tick = function (time, frame) {
+                lastXrFrame = frame;
+                if (app.xr.session === session) session.requestAnimationFrame(tick);
+            };
+            session.requestAnimationFrame(tick);
+        }
+
+        function compileShader(gl, type, src) {
+            const s = gl.createShader(type);
+            gl.shaderSource(s, src);
+            gl.compileShader(s);
+            if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+                console.log('[pcvr] shader compile failed: ' + gl.getShaderInfoLog(s));
+                return null;
+            }
+            return s;
+        }
+
+        function initGlDepth() {
+            const gl = app.graphicsDevice.gl;
+            if (!gl || glDepth) return glDepth;
+
+            /// standalone program, so it needs its own precision qualifiers - the
+            /// no-precision rule only applies to engine-injected chunks
+            const vs = compileShader(gl, gl.VERTEX_SHADER,
+                '#version 300 es\n' +
+                'in vec2 aPos;\n' +
+                'void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n');
+            const fs = compileShader(gl, gl.FRAGMENT_SHADER,
+                '#version 300 es\n' +
+                'precision highp float;\n' +
+                'precision highp usampler2DArray;\n' +
+                'uniform usampler2DArray uDepth;\n' +
+                'uniform int uLayer;\n' +
+                'uniform float uToMeters;\n' +
+                'out vec4 fragColor;\n' +
+                'void main() {\n' +
+                '    ivec3 c = ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer);\n' +
+                '    uint raw = texelFetch(uDepth, c, 0).r;\n' +
+                '    if (raw == 0u) { fragColor = vec4(0.0, 0.7, 0.0, 1.0); return; }\n' +
+                '    float meters = float(raw) * uToMeters;\n' +
+                '    float n = clamp(meters / 4.0, 0.0, 1.0);\n' +
+                '    fragColor = vec4(1.0 - n, n * 0.7, n, 1.0);\n' +
+                '}\n');
+            if (!vs || !fs) return null;
+
+            const prog = gl.createProgram();
+            gl.attachShader(prog, vs);
+            gl.attachShader(prog, fs);
+            gl.bindAttribLocation(prog, 0, 'aPos');
+            gl.linkProgram(prog);
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                console.log('[pcvr] depth program link failed: ' + gl.getProgramInfoLog(prog));
+                return null;
+            }
+
+            const vbo = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+            gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+
+            const tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, DEPTH_W, DEPTH_H, 0,
+                gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+            const fbo = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+            const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            if (!complete) {
+                console.log('[pcvr] depth fbo incomplete');
+                return null;
+            }
+
+            glDepth = {
+                prog: prog, vbo: vbo, fbo: fbo, tex: tex,
+                uDepth: gl.getUniformLocation(prog, 'uDepth'),
+                uLayer: gl.getUniformLocation(prog, 'uLayer'),
+                uToMeters: gl.getUniformLocation(prog, 'uToMeters')
+            };
+            console.log('[pcvr] raw depth GL pipeline ready');
+            return glDepth;
+        }
 
         function bindDepthPreview() {
             const views = app.xr.views;
-            if (!views.availableDepth || !views.list.length) return;
-            const view = views.list[0];
+            if (!views.availableDepth) return;
+
+            startDepthFrameLoop();
+            if (!lastXrFrame) return;
+
+            const gl = app.graphicsDevice.gl;
+            const g = initGlDepth();
+            if (!g) return;
+
+            const space = app.xr._referenceSpace;
+            if (!space) return;
+            const pose = lastXrFrame.getViewerPose(space);
+            if (!pose || !pose.views.length) return;
+
+            if (!xrBinding) xrBinding = new XRWebGLBinding(app.xr.session, gl);
+            let di = null;
+            try {
+                di = xrBinding.getDepthInformation(pose.views[0]);
+            } catch (e) {
+                return;
+            }
+            if (!di || !di.texture) return;
+
+            const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+            const prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
+            const prevVp = gl.getParameter(gl.VIEWPORT);
+            const prevArr = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+            const prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+
+            gl.bindVertexArray(null);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, g.fbo);
+            gl.viewport(0, 0, DEPTH_W, DEPTH_H);
+            gl.useProgram(g.prog);
+            gl.disable(gl.DEPTH_TEST);
+            gl.disable(gl.BLEND);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D_ARRAY, di.texture);
+            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.uniform1i(g.uDepth, 0);
+            gl.uniform1i(g.uLayer, di.imageIndex || 0);
+            gl.uniform1f(g.uToMeters, (di.rawValueToMeters || 1) * depthScale);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, g.vbo);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+            if (!depthPixels) depthPixels = new Uint8Array(DEPTH_W * DEPTH_H * 4);
+            gl.readPixels(0, 0, DEPTH_W, DEPTH_H, gl.RGBA, gl.UNSIGNED_BYTE, depthPixels);
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+            gl.useProgram(prevProg);
+            gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+            gl.bindBuffer(gl.ARRAY_BUFFER, prevArr);
+            gl.bindVertexArray(prevVao);
 
             if (!depthPreview) {
                 depthCanvas = document.createElement('canvas');
-                depthCanvas.width = DEPTH_GRID;
-                depthCanvas.height = DEPTH_GRID;
+                depthCanvas.width = DEPTH_W;
+                depthCanvas.height = DEPTH_H;
                 depthCtx = depthCanvas.getContext('2d');
-                depthImage = depthCtx.createImageData(DEPTH_GRID, DEPTH_GRID);
+                depthImage = depthCtx.createImageData(DEPTH_W, DEPTH_H);
 
                 depthTexture = new pc.Texture(app.graphicsDevice, {
-                    width: DEPTH_GRID,
-                    height: DEPTH_GRID,
+                    width: DEPTH_W,
+                    height: DEPTH_H,
                     format: pc.PIXELFORMAT_RGBA8,
                     mipmaps: false,
                     addressU: pc.ADDRESS_CLAMP_TO_EDGE,
@@ -340,36 +500,30 @@
                 depthPreview.setLocalPosition(0.56, -0.28, -1.1);
                 depthPreview.setLocalScale(0.34, 1, 0.34);
                 camera.addChild(depthPreview);
-
-                console.log('[pcvr] depth preview created, gpuOptimized=' + views.depthGpuOptimized);
             }
 
-            const data = depthImage.data;
-            let got = 0;
-            for (let y = 0; y < DEPTH_GRID; y++) {
-                for (let x = 0; x < DEPTH_GRID; x++) {
-                    const d = view.getDepth(x / (DEPTH_GRID - 1), y / (DEPTH_GRID - 1));
-                    const i = (y * DEPTH_GRID + x) * 4;
-                    if (d === null || !isFinite(d) || d <= 0) {
-                        /// green marks "no sample here", so a dead path is obvious
-                        data[i] = 0; data[i + 1] = 180; data[i + 2] = 0;
-                    } else {
-                        got++;
-                        const n = Math.min(d / 4, 1);
-                        data[i] = Math.round(255 * (1 - n));
-                        data[i + 1] = Math.round(255 * n * 0.7);
-                        data[i + 2] = Math.round(255 * n);
-                    }
-                    data[i + 3] = 255;
-                }
+            /// readPixels is bottom-up, ImageData is top-down
+            const src = depthPixels;
+            const dst = depthImage.data;
+            const rowBytes = DEPTH_W * 4;
+            for (let y = 0; y < DEPTH_H; y++) {
+                const s = (DEPTH_H - 1 - y) * rowBytes;
+                dst.set(src.subarray(s, s + rowBytes), y * rowBytes);
             }
             depthCtx.putImageData(depthImage, 0, 0);
             depthTexture.upload();
 
-            if (!depthPreview.__logged) {
-                depthPreview.__logged = true;
-                console.log('[pcvr] depth samples valid=' + got + '/' + (DEPTH_GRID * DEPTH_GRID) +
-                    ' centre=' + view.getDepth(0.5, 0.5));
+            if (!depthLogged) {
+                depthLogged = true;
+                let zero = 0;
+                let data = 0;
+                for (let i = 0; i < src.length; i += 4) {
+                    if (src[i] === 0 && src[i + 1] === 178) zero++;
+                    else data++;
+                }
+                console.log('[pcvr] raw depth blit | layer=' + (di.imageIndex || 0) +
+                    ' toMeters=' + di.rawValueToMeters +
+                    ' zeroPx=' + zero + ' dataPx=' + data);
             }
         }
 
