@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 27;
+        const BUILD = 28;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -465,6 +465,11 @@
             };
             console.log('[pcvr] depth sampler pipeline ready (float sampler2DArray)');
             return glDepth;
+        }
+
+        function bindDepthPreview() {
+            if (!app.xr.views.availableDepth) return;
+            startDepthFrameLoop();
         }
 
         function ensureDepthQuad() {
