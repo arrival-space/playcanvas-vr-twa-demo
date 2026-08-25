@@ -163,10 +163,23 @@
 
         function setStatus(msg) { status.textContent = msg; }
 
-        function startXR() {
+        let sessionRequested = false;
+
+        function startXR(reason) {
+            if (sessionRequested || app.xr.active) return;
+            sessionRequested = true;
+            console.log('[pcvr] requesting session (' + reason + ')');
             app.xr.start(camera.camera, pc.XRTYPE_VR, pc.XRSPACE_LOCALFLOOR, {
                 callback: function (err) {
-                    if (err) setStatus('could not start session: ' + err.message);
+                    if (err) {
+                        /// let a later trigger (the button, or availability
+                        /// arriving late) try again rather than latching off.
+                        sessionRequested = false;
+                        console.log('[pcvr] session failed: ' + err.message);
+                        setStatus('could not start session: ' + err.message);
+                    } else {
+                        console.log('[pcvr] session started');
+                    }
                 }
             });
         }
@@ -177,26 +190,34 @@
             setStatus('session ended — tap to re-enter');
         });
 
-        btn.addEventListener('click', startXR);
+        btn.addEventListener('click', function () { startXR('button'); });
+
+        console.log('[pcvr] boot | xr.supported=' + app.xr.supported +
+            ' | available=' + app.xr.isAvailable(pc.XRTYPE_VR));
 
         if (!app.xr.supported) {
             btn.disabled = true;
             setStatus('this browser has no WebXR — the demo still runs flat');
         } else {
+            /// Availability resolves asynchronously (navigator.xr.isSessionSupported),
+            /// so on a headset it is still false at load time. Auto-start has to hang
+            /// off this event as well, not just the synchronous read below.
             app.xr.on('available:' + pc.XRTYPE_VR, function (available) {
+                console.log('[pcvr] available:immersive-vr -> ' + available);
                 btn.disabled = !available;
                 setStatus(available ? 'immersive-vr available' : 'no immersive-vr device');
+                if (available) startXR('availability event');
             });
+
             const available = app.xr.isAvailable(pc.XRTYPE_VR);
             btn.disabled = !available;
             setStatus(available ? 'immersive-vr available' : 'checking for a headset…');
 
-            /// Meta packages an "immersive" PWA so it launches straight into the
-            /// session — the launch itself carries the activation, so try once on
-            /// load and fall back to the button when it is refused.
-            if (available) {
-                setTimeout(startXR, 250);
-            }
+            /// Meta grants the activation to an immersive-mode PWA: "clicking the PWA
+            /// app icon is considered user action to create a WebXR session". So the
+            /// launch itself is the gesture — request as soon as we know a device is
+            /// there, and keep the button as the fallback when it is refused.
+            if (available) startXR('load');
         }
 
         /// flat fallback: slow orbit so a desktop / 2D launch is not a dead screen
