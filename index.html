@@ -60,6 +60,10 @@
         /// anchors are MR features, so they need passthrough (immersive-ar) plus
         /// the USE_SCENE android permission that the packaged APK declares.
         const arMode = urlParams.get('mode') === 'ar';
+        /// XrManager.start() hard-rejects a type whose async isSessionSupported()
+        /// has not resolved yet, so availability must be tracked for the type we
+        /// actually intend to start — not just immersive-vr.
+        let sessionType = arMode ? pc.XRTYPE_AR : pc.XRTYPE_VR;
 
         app.scene.ambientLight = new pc.Color(0.12, 0.14, 0.2);
 
@@ -334,7 +338,7 @@
                 }
             };
 
-            if (arMode) {
+            if (sessionType === pc.XRTYPE_AR) {
                 /// the floor is passthrough now, so drop our own ground plane
                 floor.enabled = false;
                 opts.depthSensing = {
@@ -343,8 +347,7 @@
                 };
             }
 
-            app.xr.start(camera.camera, arMode ? pc.XRTYPE_AR : pc.XRTYPE_VR,
-                pc.XRSPACE_LOCALFLOOR, opts);
+            app.xr.start(camera.camera, sessionType, pc.XRSPACE_LOCALFLOOR, opts);
         }
 
         app.xr.on('start', function () { hud.classList.add('hidden'); });
@@ -365,16 +368,28 @@
             /// Availability resolves asynchronously (navigator.xr.isSessionSupported),
             /// so on a headset it is still false at load time. Auto-start has to hang
             /// off this event as well, not just the synchronous read below.
-            app.xr.on('available:' + pc.XRTYPE_VR, function (available) {
-                console.log('[pcvr] available:immersive-vr -> ' + available);
+            app.xr.on('available:' + sessionType, function (available) {
+                console.log('[pcvr] available:' + sessionType + ' -> ' + available);
                 btn.disabled = !available;
-                setStatus(available ? 'immersive-vr available' : 'no immersive-vr device');
+                setStatus(available ? sessionType + ' available' : 'no ' + sessionType + ' device');
                 if (available) startXR('availability event');
             });
 
-            const available = app.xr.isAvailable(pc.XRTYPE_VR);
+            /// If the headset has no immersive-ar, fall back to vr rather than
+            /// leaving the app sitting in the OS splash with nothing rendering.
+            if (arMode) {
+                app.xr.on('available:' + pc.XRTYPE_AR, function (available) {
+                    if (available || sessionRequested || app.xr.active) return;
+                    console.log('[pcvr] immersive-ar unavailable, falling back to vr');
+                    sessionType = pc.XRTYPE_VR;
+                    floor.enabled = true;
+                    if (app.xr.isAvailable(pc.XRTYPE_VR)) startXR('ar fallback');
+                });
+            }
+
+            const available = app.xr.isAvailable(sessionType);
             btn.disabled = !available;
-            setStatus(available ? 'immersive-vr available' : 'checking for a headset…');
+            setStatus(available ? sessionType + ' available' : 'checking for a headset…');
 
             /// Meta grants the activation to an immersive-mode PWA: "clicking the PWA
             /// app icon is considered user action to create a WebXR session". So the
