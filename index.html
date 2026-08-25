@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 32;
+        const BUILD = 33;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -308,7 +308,8 @@
                     const v = app.xr.views;
                     lines.push('depth sup : ' + v.supportedDepth + '  avail: ' + v.availableDepth);
                     lines.push('depth fmt : ' + v.depthFormat + ' / ' + v.depthUsage);
-                    lines.push('raw ctr   : ' + lastDepthRaw + '   scale ' + depthScale);
+                    lines.push('raw ctr   : ' + lastDepthRaw);
+                    lines.push('raw range : ' + lastRawLo + ' .. ' + lastRawHi);
                     lines.push('dist      : ' + (lastDepthCentre
                         ? lastDepthCentre.toFixed(3) + ' m' : 'no reading'));
                     bindDepthPreview();
@@ -352,6 +353,8 @@
         let lastDepthCentre = 0;
         let lastDepthRaw = 0;
         let lastHist = 0;
+        let lastRawLo = 0;
+        let lastRawHi = 0;
         const allowGpuBlit = true;
 
         function startDepthFrameLoop() {
@@ -663,6 +666,18 @@
             let valid = 0, minD = Infinity, maxD = -Infinity;
             const rowBytes = DEPTH_W * 4;
 
+            /// first pass: find the range of non-zero samples this frame
+            let qLo = 65535, qHi = 0;
+            for (let i2 = 0; i2 < src.length; i2 += 4) {
+                const q2 = src[i2] * 256 + src[i2 + 1];
+                if (q2 === 0) continue;
+                if (q2 < qLo) qLo = q2;
+                if (q2 > qHi) qHi = q2;
+            }
+            const qSpan = Math.max(1, qHi - qLo);
+            lastRawLo = qLo;
+            lastRawHi = qHi;
+
             for (let y = 0; y < DEPTH_H; y++) {
                 const s0 = (DEPTH_H - 1 - y) * rowBytes;
                 for (let x = 0; x < DEPTH_W; x++) {
@@ -676,7 +691,7 @@
                         valid++;
                         if (d < minD) minD = d;
                         if (d > maxD) maxD = d;
-                        const n = Math.min(d / 4, 1);
+                        const n = (q - qLo) / qSpan;
                         px[i] = Math.round(255 * (1 - n));
                         px[i + 1] = Math.round(255 * n * 0.7);
                         px[i + 2] = Math.round(255 * n);
