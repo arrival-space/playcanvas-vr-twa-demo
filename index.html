@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 50;
+        const BUILD = 51;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1049,6 +1049,8 @@
         let sweepSharp = 260.0;
         let sweepDistLo = 0.15;
         let sweepDistHi = 6.0;
+        let sweepEase = 2.0;
+        let fireDist = 0.7;
 
         function initEyeProg() {
             const gl = app.graphicsDevice.gl;
@@ -1077,6 +1079,8 @@
                 'uniform float uNear;\n' +
                 'uniform float uFar;\n' +
                 'uniform float uSliceM;\n' +
+                'uniform float uTime;\n' +
+                'uniform float uFireDist;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
                 'void main() {\n' +
@@ -1106,8 +1110,14 @@
                 /// cyan halo plus a much tighter white-hot core, so the peak
                 /// reads as white lightning rather than saturated cyan
                 '    float core = exp(-dist * dist * uSharp * 8.0);\n' +
-                '    col += vec3(0.35, 0.85, 1.0) * glow;\n' +
-                '    col += vec3(1.0, 1.0, 1.0) * core * 1.4;\n' +
+                /// close up it burns like fire, further out it stays cold
+                /// lightning - blended over a short band around uFireDist
+                '    float fire = 1.0 - smoothstep(uFireDist * 0.8, uFireDist * 1.25, dm);\n' +
+                '    float flick = 0.86 + 0.14 * sin(uTime * 19.0 + dm * 26.0 + vUv.y * 37.0);\n' +
+                '    vec3 haloCol = mix(vec3(0.35, 0.85, 1.0), vec3(1.00, 0.38, 0.06) * flick, fire);\n' +
+                '    vec3 coreCol = mix(vec3(1.0, 1.0, 1.0), vec3(1.00, 0.88, 0.55), fire);\n' +
+                '    col += haloCol * glow;\n' +
+                '    col += coreCol * core * 1.4;\n' +
                 '    float a = uAlpha * (0.30 + 0.70 * glow + 0.9 * core + 0.35 * contour);\n' +
                 '    fragColor = vec4(col, clamp(a, 0.0, 1.0));\n' +
                 '}\n');
@@ -1133,7 +1143,9 @@
                 uSharp: gl.getUniformLocation(prog, 'uSharp'),
                 uNear: gl.getUniformLocation(prog, 'uNear'),
                 uFar: gl.getUniformLocation(prog, 'uFar'),
-                uSliceM: gl.getUniformLocation(prog, 'uSliceM')
+                uSliceM: gl.getUniformLocation(prog, 'uSliceM'),
+                uTime: gl.getUniformLocation(prog, 'uTime'),
+                uFireDist: gl.getUniformLocation(prog, 'uFireDist')
             };
             console.log('[pcvr] per-eye composite program ready');
             return eyeProg;
@@ -1188,13 +1200,17 @@
                 : sweepFixed;
             /// linear in metres, so the bolt travels at a constant real-world
             /// speed and keeps a constant real-world thickness
-            const sliceM = sweepDistLo + (sweepDistHi - sweepDistLo) * phase;
+            /// ease in: start slow up close, accelerate outward
+            const eased = Math.pow(phase, sweepEase);
+            const sliceM = sweepDistLo + (sweepDistHi - sweepDistLo) * eased;
             gl.uniform1f(g.uSlice, 0.0);
             gl.uniform1f(g.uBands, sweepBands);
             gl.uniform1f(g.uSharp, sweepSharp);
             gl.uniform1f(g.uNear, depthNear);
             gl.uniform1f(g.uFar, depthFar);
             gl.uniform1f(g.uSliceM, sliceM);
+            gl.uniform1f(g.uTime, lastFrameTime * 0.001);
+            gl.uniform1f(g.uFireDist, fireDist);
 
             for (let i = 0; i < views.length; i++) {
                 const vp = views[i].viewport;
@@ -1413,6 +1429,14 @@
                 if (isFinite(lo)) sweepDistLo = lo;
                 if (isFinite(hi)) sweepDistHi = hi;
                 return { metresLo: sweepDistLo, metresHi: sweepDistHi };
+            },
+            ease: function (k) {
+                if (isFinite(k)) sweepEase = k;
+                return { ease: sweepEase };
+            },
+            fire: function (m) {
+                if (isFinite(m)) fireDist = m;
+                return { fireDist: fireDist };
             },
             sweep: function (speed) {
                 if (isFinite(speed)) sweepSpeed = speed;
