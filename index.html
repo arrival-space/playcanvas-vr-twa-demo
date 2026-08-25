@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 23;
+        const BUILD = 24;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -86,6 +86,30 @@
         /// has not resolved yet, so availability must be tracked for the type we
         /// actually intend to start — not just immersive-vr.
         let sessionType = arMode ? pc.XRTYPE_AR : pc.XRTYPE_VR;
+
+        /// ?dusage=cpuonly lists cpu-optimized as the ONLY acceptable usage, so the
+        /// UA must either honour it or reject - which tells us definitively whether
+        /// Quest supports CPU depth at all. Default keeps PlayCanvas' own list.
+        if (navigator.xr && urlParams.get('dusage') === 'cpuonly') {
+            const origRequest = navigator.xr.requestSession.bind(navigator.xr);
+            navigator.xr.requestSession = function (mode, opts) {
+                if (opts && opts.depthSensing) {
+                    opts.depthSensing = {
+                        usagePreference: ['cpu-optimized'],
+                        dataFormatPreference: ['luminance-alpha', 'float32', 'unsigned-short']
+                    };
+                    console.log('[pcvr] forcing cpu-only depth preference');
+                }
+                return origRequest(mode, opts).then(function (session) {
+                    console.log('[pcvr] session depthUsage=' + session.depthUsage +
+                        ' depthDataFormat=' + session.depthDataFormat);
+                    return session;
+                }, function (err) {
+                    console.log('[pcvr] cpu-only depth REJECTED: ' + err.message);
+                    throw err;
+                });
+            };
+        }
 
         app.scene.ambientLight = new pc.Color(0.12, 0.14, 0.2);
 
@@ -321,6 +345,7 @@
         /// ?dsampler=f forces the normalized-float sampler instead of the integer one
         const useUintSampler = new URLSearchParams(location.search).get('dsampler') !== 'f';
         let lastDepthBlit = 0;
+        let lastGridSample = null;
 
         function startDepthFrameLoop() {
             if (depthFrameLoopStarted) return;
@@ -437,9 +462,94 @@
             startDepthFrameLoop();
         }
 
+        function ensureDepthQuad() {
+            if (depthPreview) return;
+            depthCanvas = document.createElement('canvas');
+            depthCanvas.width = DEPTH_W;
+            depthCanvas.height = DEPTH_H;
+            depthCtx = depthCanvas.getContext('2d');
+            depthImage = depthCtx.createImageData(DEPTH_W, DEPTH_H);
+
+            depthTexture = new pc.Texture(app.graphicsDevice, {
+                width: DEPTH_W, height: DEPTH_H, format: pc.PIXELFORMAT_RGBA8,
+                mipmaps: false,
+                addressU: pc.ADDRESS_CLAMP_TO_EDGE,
+                addressV: pc.ADDRESS_CLAMP_TO_EDGE
+            });
+            depthTexture.setSource(depthCanvas);
+
+            const m = new pc.StandardMaterial();
+            m.diffuse = new pc.Color(0, 0, 0);
+            m.emissive = new pc.Color(1, 1, 1);
+            m.emissiveMap = depthTexture;
+            m.useLighting = false;
+            m.update();
+
+            depthPreview = new pc.Entity('depth-preview');
+            depthPreview.addComponent('render', { type: 'plane', material: m, castShadows: false });
+            depthPreview.setLocalEulerAngles(90, 0, 0);
+            depthPreview.setLocalPosition(0.56, -0.28, -1.1);
+            depthPreview.setLocalScale(0.34, 1, 0.34);
+            camera.addChild(depthPreview);
+        }
+
+        /// CPU path: metres straight out of the WebXR depth buffer, no GL involved
+        function cpuDepthGrid(view) {
+            ensureDepthQuad();
+            const data = depthImage.data;
+            let valid = 0;
+            let minD = Infinity;
+            let maxD = -Infinity;
+            const STEP = 5;
+            for (let y = 0; y < DEPTH_H; y++) {
+                for (let x = 0; x < DEPTH_W; x++) {
+                    const i = (y * DEPTH_W + x) * 4;
+                    let d = null;
+                    if ((x % STEP === 0) && (y % STEP === 0)) {
+                        d = view.getDepth(x / (DEPTH_W - 1), y / (DEPTH_H - 1));
+                        lastGridSample = d;
+                    } else {
+                        d = lastGridSample;
+                    }
+                    if (d === null || !isFinite(d) || d <= 0) {
+                        data[i] = 0; data[i + 1] = 180; data[i + 2] = 0;
+                    } else {
+                        valid++;
+                        if (d < minD) minD = d;
+                        if (d > maxD) maxD = d;
+                        const n = Math.min(d / 4, 1);
+                        data[i] = Math.round(255 * (1 - n));
+                        data[i + 1] = Math.round(255 * n * 0.7);
+                        data[i + 2] = Math.round(255 * n);
+                    }
+                    data[i + 3] = 255;
+                }
+            }
+            depthCtx.putImageData(depthImage, 0, 0);
+            depthTexture.upload();
+
+            if (!depthLogged) {
+                depthLogged = true;
+                console.log('[pcvr] CPU depth grid | valid=' + valid +
+                    ' min=' + (isFinite(minD) ? minD.toFixed(3) : 'n/a') +
+                    ' max=' + (isFinite(maxD) ? maxD.toFixed(3) : 'n/a') +
+                    ' centre=' + view.getDepth(0.5, 0.5));
+            }
+        }
+
         function blitDepth(frame) {
             const views = app.xr.views;
             if (!views.availableDepth) return;
+
+            /// prefer the CPU path whenever the UA actually granted it
+            if (!views.depthGpuOptimized) {
+                const space0 = app.xr._referenceSpace;
+                if (!space0) return;
+                const pose0 = frame.getViewerPose(space0);
+                if (!pose0 || !views.list.length) return;
+                cpuDepthGrid(views.list[0]);
+                return;
+            }
 
             const gl = app.graphicsDevice.gl;
             const g = initGlDepth();
@@ -493,7 +603,7 @@
             gl.uniform1i(g.uDepth, UNIT);
             const bindErr = gl.getError();
 
-            if (!depthFmtLogged) {
+            if (false && !depthFmtLogged) {
                 depthFmtLogged = true;
                 const IF = gl.getTexLevelParameter(gl.TEXTURE_2D_ARRAY, 0, gl.TEXTURE_INTERNAL_FORMAT);
                 const W = gl.getTexLevelParameter(gl.TEXTURE_2D_ARRAY, 0, gl.TEXTURE_WIDTH);
