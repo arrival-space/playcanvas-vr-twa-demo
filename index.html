@@ -54,7 +54,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 10;
+        const BUILD = 11;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -431,13 +431,18 @@
             /// launch itself is the gesture — request as soon as a device is known.
             tryStart('load');
 
+            /// An immersive-ar request can sit pending forever (permission prompt,
+            /// or activation the UA won't honour) — and because sessionRequested is
+            /// already true, nothing would ever retry. If no session is actually
+            /// live by now, drop the pending request and take VR instead.
             setTimeout(function () {
-                if (sessionRequested || app.xr.active) return;
-                console.log('[pcvr] availability timeout, forcing vr');
+                if (app.xr.active) return;
+                console.log('[pcvr] no session after 4s, forcing vr (was ' + sessionType + ')');
+                sessionRequested = false;
                 sessionType = pc.XRTYPE_VR;
                 floor.enabled = true;
                 startXR('timeout');
-            }, 2500);
+            }, 4000);
         }
 
         /// flat fallback: slow orbit so a desktop / 2D launch is not a dead screen
