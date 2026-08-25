@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 30;
+        const BUILD = 31;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -351,6 +351,7 @@
         let lastGridSample = null;
         let lastDepthCentre = 0;
         let lastDepthRaw = 0;
+        let lastHist = 0;
         const allowGpuBlit = true;
 
         function startDepthFrameLoop() {
@@ -366,7 +367,7 @@
                 if (time - lastDepthBlit > 200) {
                     lastDepthBlit = time;
                     try {
-                        blitDepth(frame);
+                        blitDepth(frame, time);
                     } catch (e) {
                         if (!depthErrLogged) {
                             depthErrLogged = true;
@@ -568,7 +569,7 @@
             return new Uint8Array(count);
         }
 
-        function blitDepth(frame) {
+        function blitDepth(frame, time0) {
             const views = app.xr.views;
             if (!views.availableDepth) return;
 
@@ -686,6 +687,27 @@
             const ci = ((DEPTH_H >> 1) * DEPTH_W + (DEPTH_W >> 1)) * 4;
             lastDepthRaw = src[ci] * 256 + src[ci + 1];
             lastDepthCentre = lastDepthRaw * depthScale;
+
+            /// histogram every ~2s: min/max hid whether this is graded or binary
+            if (time0 - lastHist > 2000) {
+                lastHist = time0;
+                const b = [0, 0, 0, 0, 0, 0];
+                for (let y = 0; y < DEPTH_H; y += 2) {
+                    for (let x = 0; x < DEPTH_W; x += 2) {
+                        const si = ((DEPTH_H - 1 - y) * DEPTH_W + x) * 4;
+                        const q = src[si] * 256 + src[si + 1];
+                        if (q === 0) b[0]++;
+                        else if (q === 65535) b[5]++;
+                        else if (q < 1000) b[1]++;
+                        else if (q < 5000) b[2]++;
+                        else if (q < 20000) b[3]++;
+                        else b[4]++;
+                    }
+                }
+                console.log('[pcvr] hist zero=' + b[0] + ' <1k=' + b[1] +
+                    ' 1k-5k=' + b[2] + ' 5k-20k=' + b[3] + ' 20k-65k=' + b[4] +
+                    ' sat=' + b[5] + ' | rawCentre=' + lastDepthRaw);
+            }
 
             if (!readLogged) {
                 readLogged = true;
