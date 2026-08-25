@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 51;
+        const BUILD = 52;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1151,6 +1151,53 @@
             return eyeProg;
         }
 
+        /// speed profile -> cumulative table -> inverted for phase lookup.
+        /// slow off the mark, slow again around focusDist (hand range), quicker
+        /// through the empty space in between and beyond.
+        let focusDist = 0.55;
+        let dwellAmt = 0.82;
+        let dwellWidth = 0.13;
+        let sweepTable = null;
+
+        function buildSweepTable() {
+            const N = 256;
+            const speed = new Float64Array(N);
+            const cum = new Float64Array(N + 1);
+            const span = Math.max(0.0001, sweepDistHi - sweepDistLo);
+            const pf = (focusDist - sweepDistLo) / span;
+            let acc = 0;
+
+            for (let i = 0; i < N; i++) {
+                const t = (i + 0.5) / N;
+                const g = Math.exp(-((t - pf) * (t - pf)) / (2 * dwellWidth * dwellWidth));
+                /// (soft start) x (dwell at the focus distance)
+                const v = (0.30 + 0.70 * t) * (1 - dwellAmt * g);
+                speed[i] = Math.max(0.02, v);
+            }
+            for (let i = 0; i < N; i++) {
+                acc += speed[i];
+                cum[i + 1] = acc;
+            }
+            for (let i = 0; i <= N; i++) cum[i] /= acc;
+            sweepTable = { cum: cum, N: N };
+        }
+
+        function phaseToFrac(phase) {
+            if (!sweepTable) buildSweepTable();
+            const cum = sweepTable.cum;
+            const N = sweepTable.N;
+            let lo = 0;
+            let hi = N;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (cum[mid] < phase) lo = mid + 1; else hi = mid;
+            }
+            const i = Math.max(1, lo);
+            const denom = Math.max(1e-9, cum[i] - cum[i - 1]);
+            const t = (phase - cum[i - 1]) / denom;
+            return (i - 1 + t) / N;
+        }
+
         /// draw after PlayCanvas has rendered, straight into the XR framebuffer
         function compositeEyes() {
             if (!eyeOn || !app.xr.active || !lastDi || !lastDi.texture) return;
@@ -1200,9 +1247,7 @@
                 : sweepFixed;
             /// linear in metres, so the bolt travels at a constant real-world
             /// speed and keeps a constant real-world thickness
-            /// ease in: start slow up close, accelerate outward
-            const eased = Math.pow(phase, sweepEase);
-            const sliceM = sweepDistLo + (sweepDistHi - sweepDistLo) * eased;
+            const sliceM = sweepDistLo + (sweepDistHi - sweepDistLo) * phaseToFrac(phase);
             gl.uniform1f(g.uSlice, 0.0);
             gl.uniform1f(g.uBands, sweepBands);
             gl.uniform1f(g.uSharp, sweepSharp);
@@ -1428,11 +1473,15 @@
             sweepRange: function (lo, hi) {
                 if (isFinite(lo)) sweepDistLo = lo;
                 if (isFinite(hi)) sweepDistHi = hi;
+                buildSweepTable();
                 return { metresLo: sweepDistLo, metresHi: sweepDistHi };
             },
-            ease: function (k) {
-                if (isFinite(k)) sweepEase = k;
-                return { ease: sweepEase };
+            focus: function (m, amount, width) {
+                if (isFinite(m)) focusDist = m;
+                if (isFinite(amount)) dwellAmt = Math.min(0.97, Math.max(0, amount));
+                if (isFinite(width)) dwellWidth = width;
+                buildSweepTable();
+                return { focusDist: focusDist, dwell: dwellAmt, width: dwellWidth };
             },
             fire: function (m) {
                 if (isFinite(m)) fireDist = m;
