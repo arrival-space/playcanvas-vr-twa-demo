@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 48;
+        const BUILD = 49;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1093,8 +1093,12 @@
                 '    float glow = exp(-dist * dist * uSharp);\n' +
                 '    vec3 base = vec3(1.0 - n, n * 0.55, n);\n' +
                 '    vec3 col = base * 0.55 + vec3(0.25, 0.55, 0.75) * contour;\n' +
-                '    col += vec3(0.45, 1.0, 0.95) * glow;\n' +
-                '    float a = uAlpha * (0.30 + 0.75 * glow + 0.35 * contour);\n' +
+                /// cyan halo plus a much tighter white-hot core, so the peak
+                /// reads as white lightning rather than saturated cyan
+                '    float core = exp(-dist * dist * uSharp * 8.0);\n' +
+                '    col += vec3(0.35, 0.85, 1.0) * glow;\n' +
+                '    col += vec3(1.0, 1.0, 1.0) * core * 1.4;\n' +
+                '    float a = uAlpha * (0.30 + 0.70 * glow + 0.9 * core + 0.35 * contour);\n' +
                 '    fragColor = vec4(col, clamp(a, 0.0, 1.0));\n' +
                 '}\n');
             if (!vs || !fs) return null;
