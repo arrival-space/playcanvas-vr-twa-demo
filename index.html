@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 42;
+        const BUILD = 43;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -651,6 +651,8 @@
             }
             if (!di || !di.texture) return;
 
+            lastDi = di;
+
             const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
             const prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
             const prevVp = gl.getParameter(gl.VIEWPORT);
@@ -949,6 +951,120 @@
             rig.rotate(0, 4 * dt, 0);
         });
 
+        /// ---- per-eye screen-space depth composite ----
+        let eyeProg = null;
+        let eyeOn = false;
+        let eyeAlpha = 0.6;
+        /// FIXED range - auto-contrast per frame makes a near object rescale the
+        /// whole scene, which reads as the background shifting when a hand appears
+        let eyeLo = 45000;
+        let eyeHi = 65535;
+        let lastDi = null;
+
+        function initEyeProg() {
+            const gl = app.graphicsDevice.gl;
+            if (eyeProg) return eyeProg;
+
+            const vs = compileShader(gl, gl.VERTEX_SHADER,
+                '#version 300 es\n' +
+                'out vec2 vUv;\n' +
+                'void main() {\n' +
+                '    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n' +
+                '    vUv = p;\n' +
+                '    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n' +
+                '}\n');
+            const fs = compileShader(gl, gl.FRAGMENT_SHADER,
+                '#version 300 es\n' +
+                'precision highp float;\n' +
+                'precision highp sampler2DArray;\n' +
+                'uniform sampler2DArray uDepth;\n' +
+                'uniform float uLayer;\n' +
+                'uniform float uLo;\n' +
+                'uniform float uHi;\n' +
+                'uniform float uAlpha;\n' +
+                'in vec2 vUv;\n' +
+                'out vec4 fragColor;\n' +
+                'void main() {\n' +
+                '    float raw = texture(uDepth, vec3(vUv, uLayer)).r * 65535.0;\n' +
+                '    if (raw <= 0.0) { discard; }\n' +
+                '    float n = clamp((raw - uLo) / max(1.0, uHi - uLo), 0.0, 1.0);\n' +
+                '    fragColor = vec4(1.0 - n, n * 0.7, n, uAlpha);\n' +
+                '}\n');
+            if (!vs || !fs) return null;
+
+            const prog = gl.createProgram();
+            gl.attachShader(prog, vs);
+            gl.attachShader(prog, fs);
+            gl.linkProgram(prog);
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                console.log('[pcvr] eye program link failed: ' + gl.getProgramInfoLog(prog));
+                return null;
+            }
+            eyeProg = {
+                prog: prog,
+                uDepth: gl.getUniformLocation(prog, 'uDepth'),
+                uLayer: gl.getUniformLocation(prog, 'uLayer'),
+                uLo: gl.getUniformLocation(prog, 'uLo'),
+                uHi: gl.getUniformLocation(prog, 'uHi'),
+                uAlpha: gl.getUniformLocation(prog, 'uAlpha')
+            };
+            console.log('[pcvr] per-eye composite program ready');
+            return eyeProg;
+        }
+
+        /// draw after PlayCanvas has rendered, straight into the XR framebuffer
+        function compositeEyes() {
+            if (!eyeOn || !app.xr.active || !lastDi || !lastDi.texture) return;
+            const gl = app.graphicsDevice.gl;
+            const g = initEyeProg();
+            if (!g) return;
+
+            const views = app.xr.views.list;
+            if (!views.length) return;
+
+            const prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
+            const prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+            const prevVp = gl.getParameter(gl.VIEWPORT);
+            const prevBlend = gl.isEnabled(gl.BLEND);
+            const prevDepth = gl.isEnabled(gl.DEPTH_TEST);
+            const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
+            const prevActive = gl.getParameter(gl.ACTIVE_TEXTURE);
+
+            gl.bindVertexArray(null);
+            gl.useProgram(g.prog);
+            gl.disable(gl.DEPTH_TEST);
+            gl.disable(gl.SCISSOR_TEST);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            const UNIT = 14;
+            gl.activeTexture(gl.TEXTURE0 + UNIT);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.bindTexture(gl.TEXTURE_2D_ARRAY, lastDi.texture);
+            gl.uniform1i(g.uDepth, UNIT);
+            gl.uniform1f(g.uLo, eyeLo);
+            gl.uniform1f(g.uHi, eyeHi);
+            gl.uniform1f(g.uAlpha, eyeAlpha);
+
+            for (let i = 0; i < views.length; i++) {
+                const vp = views[i].viewport;
+                gl.viewport(vp.x, vp.y, vp.z, vp.w);
+                /// each eye samples ITS OWN layer of the depth array
+                gl.uniform1f(g.uLayer, i);
+                gl.drawArrays(gl.TRIANGLES, 0, 3);
+            }
+
+            gl.useProgram(prevProg);
+            gl.bindVertexArray(prevVao);
+            gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+            gl.activeTexture(prevActive);
+            if (!prevBlend) gl.disable(gl.BLEND);
+            if (prevDepth) gl.enable(gl.DEPTH_TEST);
+            if (prevScissor) gl.enable(gl.SCISSOR_TEST);
+        }
+
+        app.on('postrender', compositeEyes);
+
         /// ---- world-space depth reconstruction ----
         const CLOUD_STEP = 3;                     // sample every Nth texel
         let cloudEntity = null;
@@ -1132,6 +1248,24 @@
                 if (cloudEntity) cloudEntity.enabled = cloudOn;
                 if (depthPreview && cloudOn) depthPreview.enabled = false;
                 return { cloud: cloudOn, points: cloudCount };
+            },
+            eyes: function (v) {
+                eyeOn = !!v;
+                if (eyeOn) {
+                    if (depthPreview) depthPreview.enabled = false;
+                    if (cloudEntity) cloudEntity.enabled = false;
+                    cloudOn = false;
+                }
+                return { perEye: eyeOn };
+            },
+            range: function (lo, hi) {
+                if (isFinite(lo)) eyeLo = lo;
+                if (isFinite(hi)) eyeHi = hi;
+                return { lo: eyeLo, hi: eyeHi, observedLo: lastRawLo, observedHi: lastRawHi };
+            },
+            eyeAlpha: function (a) {
+                if (isFinite(a)) eyeAlpha = a;
+                return { alpha: eyeAlpha };
             },
             nearFar: function (n, f) {
                 if (isFinite(n)) depthNear = n;
