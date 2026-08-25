@@ -42,7 +42,9 @@
             mouse: new pc.Mouse(canvas),
             touch: new pc.TouchDevice(canvas),
             keyboard: new pc.Keyboard(window),
-            graphicsDeviceOptions: { antialias: true, alpha: false }
+            /// alpha must be true or the framebuffer is opaque and AR passthrough
+            /// has nothing to composite through — the scene just renders black.
+            graphicsDeviceOptions: { antialias: true, alpha: true }
         });
         app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
         app.setCanvasResolution(pc.RESOLUTION_AUTO);
@@ -54,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 13;
+        const BUILD = 14;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -366,7 +368,14 @@
             app.xr.start(camera.camera, sessionType, pc.XRSPACE_LOCALFLOOR, opts);
         }
 
-        app.xr.on('start', function () { hud.classList.add('hidden'); });
+        app.xr.on('start', function () {
+            hud.classList.add('hidden');
+            /// transparent clear in AR so the real room shows behind the scene
+            if (app.xr.type === pc.XRTYPE_AR) {
+                camera.camera.clearColor = new pc.Color(0, 0, 0, 0);
+                console.log('[pcvr] ar clear colour set transparent');
+            }
+        });
         app.xr.on('end', function () {
             hud.classList.remove('hidden');
             setStatus('session ended — tap to re-enter');
