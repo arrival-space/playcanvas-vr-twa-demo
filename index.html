@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 40;
+        const BUILD = 41;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1007,7 +1007,10 @@
         function updateCloud(view, src) {
             ensureCloud();
             const pm = view.projMat.data;
-            const inv = view.viewInvMat;
+            /// 2.21 exposes only the private _viewInvMat; the public getter does
+            /// not exist, and calling it silently killed the whole update
+            const inv = view._viewInvMat || view.viewInvMat;
+            if (!inv) { console.log('[pcvr] no view inverse matrix'); return; }
             const sx = pm[0], sy = pm[5], kx = pm[8], ky = pm[9];
 
             const gw = Math.floor(DEPTH_W / CLOUD_STEP);
