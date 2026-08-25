@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 31;
+        const BUILD = 32;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -406,22 +406,24 @@
                 '    vUv = aPos * 0.5 + 0.5;\n' +
                 '    gl_Position = vec4(aPos, 0.0, 1.0);\n' +
                 '}\n');
+            const useFloat = new URLSearchParams(location.search).get('dsampler') !== 'u';
             const fs = compileShader(gl, gl.FRAGMENT_SHADER,
                 '#version 300 es\n' +
                 'precision highp float;\n' +
-                'precision highp sampler2DArray;\n' +
-                'uniform sampler2DArray uDepth;\n' +
+                (useFloat
+                    ? 'precision highp sampler2DArray;\nuniform sampler2DArray uDepth;\n'
+                    : 'precision highp usampler2DArray;\nuniform usampler2DArray uDepth;\n') +
                 'uniform float uLayer;\n' +
-                'uniform float uToMeters;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
                 'void main() {\n' +
-                '    float raw = texture(uDepth, vec3(vUv, uLayer)).r;\n' +
-                '    float meters = raw * 1000.0 * uToMeters;\n' +
-                /// pack metres into R+G as a 16-bit fixed point over 0..16m so the
-                /// readback gives real numbers, not just a picture
-                '    float n = clamp(meters / 16.0, 0.0, 1.0);\n' +
-                '    float q = floor(n * 65535.0 + 0.5);\n' +
+                '    ivec3 c = ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), int(uLayer));\n' +
+                /// pack the RAW value - the previous shader scaled by 1000
+                /// and clamped at 16m, which saturated nearly every pixel to 1.0
+                /// and made real depth look like a binary mask
+                (useFloat
+                    ? '    float q = floor(clamp(texture(uDepth, vec3(vUv, uLayer)).r, 0.0, 1.0) * 65535.0 + 0.5);\n'
+                    : '    float q = float(texelFetch(uDepth, c, 0).r);\n') +
                 '    float hi = floor(q / 256.0);\n' +
                 '    float lo = q - hi * 256.0;\n' +
                 '    fragColor = vec4(hi / 255.0, lo / 255.0, 0.0, 1.0);\n' +
@@ -466,7 +468,8 @@
                 uLayer: gl.getUniformLocation(prog, 'uLayer'),
                 uToMeters: gl.getUniformLocation(prog, 'uToMeters')
             };
-            console.log('[pcvr] depth sampler pipeline ready (float sampler2DArray)');
+            console.log('[pcvr] depth pipeline ready (' +
+                (useFloat ? 'float sampler2DArray' : 'usampler2DArray texelFetch') + ')');
             return glDepth;
         }
 
