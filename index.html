@@ -8,30 +8,81 @@
     <meta name="theme-color" content="#1a8fe3" />
     <link rel="icon" href="icon-192.png" />
     <style>
-        html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #05070d; }
+        :root {
+            --bg: #05070d;
+            --accent: #4cc2ff;
+            --text: #e8eef8;
+            --muted: #8496ad;
+        }
+        html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: var(--bg); }
         canvas { display: block; width: 100%; height: 100%; }
+
         #hud {
             position: fixed; inset: 0; display: flex; flex-direction: column;
-            align-items: center; justify-content: center; gap: 24px;
-            font: 400 16px/1.5 system-ui, sans-serif; color: #cfd8e6;
-            pointer-events: none;
+            align-items: center; justify-content: center;
+            font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+            color: var(--text); pointer-events: none;
+            background: radial-gradient(ellipse at 50% 45%, rgba(10,20,40,0.55), rgba(5,7,13,0.9) 70%);
         }
-        #hud h1 { margin: 0; font-size: 28px; font-weight: 600; color: #fff; letter-spacing: -0.01em; }
+        #card {
+            pointer-events: auto;
+            width: min(90vw, 540px);
+            padding: 40px 36px 32px;
+            border-radius: 20px;
+            background: rgba(14, 20, 34, 0.72);
+            border: 1px solid rgba(76, 194, 255, 0.22);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+            backdrop-filter: blur(14px);
+            text-align: center;
+        }
+        #eyebrow {
+            font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
+            color: var(--accent); font-weight: 600; margin-bottom: 14px;
+        }
+        #hud h1 {
+            margin: 0 0 14px; font-size: 30px; line-height: 1.15;
+            font-weight: 650; letter-spacing: -0.02em; color: #fff;
+        }
+        #blurb { margin: 0 0 26px; font-size: 15px; line-height: 1.55; color: var(--muted); }
+        #blurb b { color: var(--text); font-weight: 600; }
+
         #enter {
-            pointer-events: auto; padding: 18px 40px; font-size: 20px; font-weight: 600;
-            color: #05070d; background: #1a8fe3; border: 0; border-radius: 999px; cursor: pointer;
+            pointer-events: auto; display: inline-flex; align-items: center; gap: 10px;
+            padding: 16px 34px; font-size: 18px; font-weight: 650;
+            font-family: inherit; color: #04121c;
+            background: linear-gradient(180deg, #7ed6ff, var(--accent));
+            border: 0; border-radius: 999px; cursor: pointer;
+            box-shadow: 0 8px 26px rgba(76,194,255,0.35);
+            transition: transform .12s ease, box-shadow .12s ease;
         }
-        #enter[disabled] { background: #2b3242; color: #6b7688; cursor: default; }
-        #status { font-size: 14px; color: #7d8ba3; max-width: 32ch; text-align: center; }
+        #enter:hover { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(76,194,255,0.45); }
+        #enter:active { transform: translateY(1px); }
+        #enter[disabled] {
+            background: #223047; color: #6b7c92; cursor: default;
+            box-shadow: none; transform: none;
+        }
+
+        #status { margin-top: 18px; font-size: 13px; color: var(--muted); min-height: 18px; }
+        #status.warn { color: #ffb86b; }
+        #note { margin-top: 22px; font-size: 12px; color: #5f7086; line-height: 1.5; }
         .hidden { display: none !important; }
     </style>
 </head>
 <body>
     <script src="playcanvas.min.js"></script>
     <div id="hud">
-        <h1>PlayCanvas VR Demo</h1>
-        <button id="enter">Enter VR</button>
-        <div id="status">checking WebXR support&hellip;</div>
+        <div id="card">
+            <div id="eyebrow">WebXR &middot; Quest 3</div>
+            <h1>Per-pixel depth,<br />straight off the sensors</h1>
+            <p id="blurb">
+                Real depth from the headset&rsquo;s own sensors &mdash; sampled
+                <b>per eye</b>, so it lands on your hands in stereo.
+                No AI, no native code.
+            </p>
+            <button id="enter">Enter Mixed Reality</button>
+            <div id="status">checking your headset&hellip;</div>
+            <div id="note">Quest 3 or 3S in Meta Quest Browser. You&rsquo;ll be asked to allow spatial data.</div>
+        </div>
     </div>
     <script>
     (function () {
@@ -56,18 +107,18 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 45;
+        const BUILD = 46;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
-        const requestedScale = (isFinite(scaleParam) && scaleParam > 0) ? scaleParam : 1.0;
+        const requestedScale = (isFinite(scaleParam) && scaleParam > 0) ? scaleParam : 1.5;
 
         /// ?mode=ar starts an immersive-ar session with depth sensing. Depth and
         /// anchors are MR features, so they need passthrough (immersive-ar) plus
         /// the USE_SCENE android permission that the packaged APK declares.
         /// VR is the default: a plain launch must always come up. AR/depth is
         /// opt-in via ?mode=ar so an experiment can never break the base demo.
-        const arMode = urlParams.get('mode') === 'ar';
+        const arMode = urlParams.get('mode') !== 'vr';
         /// panel, controller rays and cubes are diagnostics - off unless ?debug=1
         const showDebug = urlParams.get('debug') === '1';
         /// PIXELFORMAT_DEPTH (unsigned-short) samples as zero through a normal
@@ -829,7 +880,10 @@
         const btn = document.getElementById('enter');
         const status = document.getElementById('status');
 
-        function setStatus(msg) { status.textContent = msg; }
+        function setStatus(msg, warn) {
+            status.textContent = msg;
+            status.classList.toggle('warn', !!warn);
+        }
 
         let sessionRequested = false;
 
@@ -847,7 +901,13 @@
                         /// arriving late) try again rather than latching off.
                         sessionRequested = false;
                         console.log('[pcvr] session failed: ' + err.message);
-                        setStatus('could not start session: ' + err.message);
+                        /// a plain page load has no user activation - that is
+                        /// expected, not an error worth alarming anyone with
+                        if (/activation/i.test(err.message)) {
+                            setStatus('ready \u2014 tap the button to start', false);
+                        } else {
+                            setStatus(err.message, true);
+                        }
                     } else {
                         console.log('[pcvr] session started');
                     }
@@ -876,18 +936,18 @@
         });
         app.xr.on('end', function () {
             hud.classList.remove('hidden');
-            setStatus('session ended — tap to re-enter');
+            setStatus('session ended — tap to go back in');
         });
 
         btn.addEventListener('click', function () { startXR('button'); });
 
         console.log('[pcvr] boot | build=' + BUILD + ' | xr.supported=' + app.xr.supported +
             ' | available=' + app.xr.isAvailable(sessionType));
-        document.querySelector('#hud h1').textContent = 'PlayCanvas VR Demo — build ' + BUILD;
+        document.getElementById('eyebrow').textContent = 'WebXR · Quest 3 · build ' + BUILD;
 
         if (!app.xr.supported) {
             btn.disabled = true;
-            setStatus('this browser has no WebXR — the demo still runs flat');
+            setStatus('this browser has no WebXR support', true);
         } else {
             /// Availability resolves asynchronously (navigator.xr.isSessionSupported),
             /// so on a headset it is still false at load time. Auto-start has to hang
@@ -930,7 +990,7 @@
                 });
             });
 
-            setStatus('checking for a headset…');
+            setStatus('checking your headset…');
 
             /// Meta grants the activation to an immersive-mode PWA: "clicking the PWA
             /// app icon is considered user action to create a WebXR session". So the
