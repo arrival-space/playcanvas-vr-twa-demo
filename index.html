@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 15;
+        const BUILD = 16;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -68,6 +68,8 @@
         /// VR is the default: a plain launch must always come up. AR/depth is
         /// opt-in via ?mode=ar so an experiment can never break the base demo.
         const arMode = urlParams.get('mode') === 'ar';
+        const dscaleParam = parseFloat(urlParams.get('dscale'));
+        const depthScale = isFinite(dscaleParam) ? dscaleParam : 65535.0;
         /// XrManager.start() hard-rejects a type whose async isSessionSupported()
         /// has not resolved yet, so availability must be tracked for the type we
         /// actually intend to start — not just immersive-vr.
@@ -319,13 +321,19 @@
                         'uniform sampler2D texture_depthSensingMap;',
                         'uniform mat4 matrix_depth_uv;',
                         'uniform float depth_to_meters;',
+                        'uniform float depth_scale;',
                         'void main(void) {',
                         '    vec2 texCoord = (matrix_depth_uv * vec4(vUv0.xy, 0.0, 1.0)).xy;',
                         '    float raw = texture2D(texture_depthSensingMap, texCoord).r;',
-                        '    float meters = raw * 65535.0 * depth_to_meters;',
-                        '    float n = clamp(meters / 4.0, 0.0, 1.0);',
-                        '    vec3 col = vec3(1.0 - n, n * 0.7, n);',
-                        '    gl_FragColor = vec4(col, 1.0);',
+                        /// green means the sample really is zero, which separates
+                        /// "no data reaching the shader" from "wrong scale factor"
+                        '    if (raw <= 0.0) {',
+                        '        gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);',
+                        '    } else {',
+                        '        float meters = raw * depth_to_meters * depth_scale;',
+                        '        float n = clamp(meters / 4.0, 0.0, 1.0);',
+                        '        gl_FragColor = vec4(1.0 - n, n * 0.7, n, 1.0);',
+                        '    }',
                         '}'
                     ].join('\n')
                 });
@@ -341,7 +349,10 @@
             const view = views.list[0];
             mat.setParameter('texture_depthSensingMap', tex);
             mat.setParameter('matrix_depth_uv', view.depthUvMatrix.data);
-            mat.setParameter('depth_to_meters', view.depthValueToMeters);
+            mat.setParameter('depth_to_meters', view.depthValueToMeters || 1);
+            /// tunable from the URL (?dscale=) so the scale can be swept without
+            /// a redeploy — the raw unit is not documented for PIXELFORMAT_DEPTH
+            mat.setParameter('depth_scale', depthScale);
 
             if (!depthPreview.__logged) {
                 depthPreview.__logged = true;
