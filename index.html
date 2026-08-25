@@ -54,7 +54,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 7;
+        const BUILD = 8;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -63,7 +63,10 @@
         /// ?mode=ar starts an immersive-ar session with depth sensing. Depth and
         /// anchors are MR features, so they need passthrough (immersive-ar) plus
         /// the USE_SCENE android permission that the packaged APK declares.
-        const arMode = urlParams.get('mode') === 'ar';
+        /// AR is the default so that launching from the app icon (which can only
+        /// ever load the bare manifest start_url) still exercises depth sensing.
+        /// ?mode=vr forces the plain immersive-vr path.
+        const arMode = urlParams.get('mode') !== 'vr';
         /// XrManager.start() hard-rejects a type whose async isSessionSupported()
         /// has not resolved yet, so availability must be tracked for the type we
         /// actually intend to start — not just immersive-vr.
