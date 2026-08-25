@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 55;
+        const BUILD = 57;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1448,6 +1448,192 @@
             cloudMesh.update(pc.PRIMITIVE_POINTS);
         }
 
+        /// ---- real-world occlusion -------------------------------------
+        /// Prime the depth buffer from the sensor before PlayCanvas draws the
+        /// scene. Its geometry then depth-tests against the real room, so a hand
+        /// in front of a virtual object actually hides it.
+        ///
+        /// The sensor gives projective depth with its own near/far; the frame
+        /// buffer wants NDC depth for the CURRENT camera projection, so convert:
+        ///     z_ndc = -p[10] + p[14] / d      (d = metres, right-handed, -Z fwd)
+        ///     gl_FragDepth = (z_ndc + 1) * 0.5
+        let occProg = null;
+        let occOn = false;
+        let occBias = 0.02;          // metres, pushes real geometry slightly back
+
+        function initOccProg() {
+            const gl = app.graphicsDevice.gl;
+            if (occProg) return occProg;
+
+            const vs = compileShader(gl, gl.VERTEX_SHADER,
+                '#version 300 es\n' +
+                'out vec2 vUv;\n' +
+                'void main() {\n' +
+                '    vec2 q = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n' +
+                '    vUv = q;\n' +
+                '    gl_Position = vec4(q * 2.0 - 1.0, 0.0, 1.0);\n' +
+                '}\n');
+            const fs = compileShader(gl, gl.FRAGMENT_SHADER,
+                '#version 300 es\n' +
+                'precision highp float;\n' +
+                'precision highp sampler2DArray;\n' +
+                'uniform sampler2DArray uDepth;\n' +
+                'uniform float uLayer;\n' +
+                'uniform float uNear;\n' +
+                'uniform float uFar;\n' +
+                'uniform float uP10;\n' +
+                'uniform float uP14;\n' +
+                'uniform float uBias;\n' +
+                'in vec2 vUv;\n' +
+                'out vec4 fragColor;\n' +
+                'void main() {\n' +
+                '    float raw = texture(uDepth, vec3(vUv, uLayer)).r;\n' +
+                /// no reading here -> infinitely far, occlude nothing
+                '    if (raw <= 0.0) { gl_FragDepth = 1.0; fragColor = vec4(0.0); return; }\n' +
+                '    float invd = (1.0 / uNear) - raw * ((1.0 / uNear) - (1.0 / uFar));\n' +
+                '    float dm = 1.0 / max(invd, 0.0001) + uBias;\n' +
+                '    float zndc = -uP10 + uP14 / max(dm, 0.01);\n' +
+                '    gl_FragDepth = clamp((zndc + 1.0) * 0.5, 0.0, 1.0);\n' +
+                '    fragColor = vec4(0.0);\n' +
+                '}\n');
+            if (!vs || !fs) return null;
+
+            const prog = gl.createProgram();
+            gl.attachShader(prog, vs);
+            gl.attachShader(prog, fs);
+            gl.linkProgram(prog);
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                console.log('[pcvr] occlusion program link failed: ' + gl.getProgramInfoLog(prog));
+                return null;
+            }
+            occProg = {
+                prog: prog,
+                uDepth: gl.getUniformLocation(prog, 'uDepth'),
+                uLayer: gl.getUniformLocation(prog, 'uLayer'),
+                uNear: gl.getUniformLocation(prog, 'uNear'),
+                uFar: gl.getUniformLocation(prog, 'uFar'),
+                uP10: gl.getUniformLocation(prog, 'uP10'),
+                uP14: gl.getUniformLocation(prog, 'uP14'),
+                uBias: gl.getUniformLocation(prog, 'uBias')
+            };
+            console.log('[pcvr] occlusion depth-prime program ready');
+            return occProg;
+        }
+
+        /// runs before the scene draw, into whatever target PlayCanvas has bound
+        function primeDepth() {
+            if (!occOn || !app.xr.active || !lastDi || !lastDi.texture) return;
+            const gl = app.graphicsDevice.gl;
+            const g = initOccProg();
+            if (!g) return;
+            const views = app.xr.views.list;
+            if (!views.length) return;
+
+            const prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
+            const prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+            const prevVp = gl.getParameter(gl.VIEWPORT);
+            const prevActive = gl.getParameter(gl.ACTIVE_TEXTURE);
+            const prevDepth = gl.isEnabled(gl.DEPTH_TEST);
+            const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
+
+            gl.bindVertexArray(null);
+            gl.useProgram(g.prog);
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.ALWAYS);
+            gl.depthMask(true);
+            gl.disable(gl.SCISSOR_TEST);
+            /// depth only - leave the colour buffer alone
+            gl.colorMask(false, false, false, false);
+
+            const UNIT = 13;
+            gl.activeTexture(gl.TEXTURE0 + UNIT);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.bindTexture(gl.TEXTURE_2D_ARRAY, lastDi.texture);
+            gl.uniform1i(g.uDepth, UNIT);
+            gl.uniform1f(g.uNear, depthNear);
+            gl.uniform1f(g.uFar, depthFar);
+            gl.uniform1f(g.uBias, occBias);
+
+            for (let i = 0; i < views.length; i++) {
+                const vp = views[i].viewport;
+                const pm = views[i].projMat.data;
+                gl.viewport(vp.x, vp.y, vp.z, vp.w);
+                gl.uniform1f(g.uLayer, i);
+                gl.uniform1f(g.uP10, pm[10]);
+                gl.uniform1f(g.uP14, pm[14]);
+                gl.drawArrays(gl.TRIANGLES, 0, 3);
+            }
+
+            gl.colorMask(true, true, true, true);
+            gl.depthFunc(gl.LESS);
+            gl.useProgram(prevProg);
+            gl.bindVertexArray(prevVao);
+            gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+            gl.activeTexture(prevActive);
+            if (!prevDepth) gl.disable(gl.DEPTH_TEST);
+            if (prevScissor) gl.enable(gl.SCISSOR_TEST);
+        }
+
+        app.scene.on('prerender', primeDepth);
+
+        /// a few probes at arm's-length depths to test the occlusion against
+        let probes = null;
+        function ensureProbes() {
+            if (probes) return probes;
+            probes = [];
+            const spec = [
+                { p: [-0.28, 0.0, -0.55], c: [1.0, 0.35, 0.25] },
+                { p: [0.00, 0.10, -0.85], c: [0.35, 1.0, 0.55] },
+                { p: [0.30, -0.05, -1.20], c: [0.40, 0.60, 1.0] },
+                { p: [-0.10, -0.20, -1.60], c: [1.0, 0.85, 0.30] }
+            ];
+            for (let i = 0; i < spec.length; i++) {
+                const e = new pc.Entity('probe' + i);
+                e.addComponent('render', {
+                    type: 'sphere',
+                    material: material(spec[i].c[0], spec[i].c[1], spec[i].c[2], true)
+                });
+                e.setLocalPosition(spec[i].p[0], spec[i].p[1], spec[i].p[2]);
+                e.setLocalScale(0.16, 0.16, 0.16);
+                camera.addChild(e);
+                probes.push(e);
+            }
+            return probes;
+        }
+
+        /// ---- gaussian splat, for testing occlusion against real geometry ----
+        let splatEntity = null;
+        let splatAsset = null;
+        let splatLoading = false;
+
+        function loadSplat(cb) {
+            if (splatEntity) { if (cb) cb(null, splatEntity); return; }
+            if (splatLoading) return;
+            splatLoading = true;
+
+            const asset = new pc.Asset('biker', 'gsplat', { url: 'biker.ply' });
+            asset.on('load', function () {
+                splatAsset = asset;
+                splatEntity = new pc.Entity('splat');
+                splatEntity.addComponent('gsplat', { asset: asset });
+                /// most captures come in Y-down relative to PlayCanvas
+                splatEntity.setLocalEulerAngles(180, 0, 0);
+                splatEntity.setLocalPosition(0, -0.2, -1.1);
+                splatEntity.setLocalScale(0.6, 0.6, 0.6);
+                camera.addChild(splatEntity);
+                splatLoading = false;
+                console.log('[pcvr] splat loaded');
+                if (cb) cb(null, splatEntity);
+            });
+            asset.on('error', function (err) {
+                splatLoading = false;
+                console.log('[pcvr] splat load failed: ' + err);
+                if (cb) cb(err);
+            });
+            app.assets.add(asset);
+            app.assets.load(asset);
+        }
+
         /// Live tuning surface. Everything below is driven over the DevTools
         /// connection, so geometry can be adjusted on the running session instead
         /// of going round the deploy/cache/relaunch loop for every value.
@@ -1508,6 +1694,43 @@
                 if (cloudEntity) cloudEntity.enabled = cloudOn;
                 if (depthPreview && cloudOn) depthPreview.enabled = false;
                 return { cloud: cloudOn, points: cloudCount };
+            },
+            splat: function (v) {
+                if (!v) {
+                    if (splatEntity) splatEntity.enabled = false;
+                    return { splat: false };
+                }
+                loadSplat();
+                if (splatEntity) splatEntity.enabled = true;
+                return { splat: true, loaded: !!splatEntity, loading: splatLoading };
+            },
+            splatPlace: function (x, y, z, scale) {
+                if (!splatEntity) return 'not loaded';
+                if (isFinite(x) && isFinite(y) && isFinite(z)) splatEntity.setLocalPosition(x, y, z);
+                if (isFinite(scale)) splatEntity.setLocalScale(scale, scale, scale);
+                const p2 = splatEntity.getLocalPosition();
+                const sc = splatEntity.getLocalScale();
+                return { pos: [p2.x, p2.y, p2.z], scale: sc.x };
+            },
+            splatRotate: function (rx, ry, rz) {
+                if (!splatEntity) return 'not loaded';
+                splatEntity.setLocalEulerAngles(rx || 0, ry || 0, rz || 0);
+                return { euler: [rx || 0, ry || 0, rz || 0] };
+            },
+            occlude: function (v) {
+                occOn = !!v;
+                /// PlayCanvas must not wipe the depth we just wrote
+                camera.camera.clearDepthBuffer = !occOn;
+                return { occlude: occOn, bias: occBias };
+            },
+            bias: function (m) {
+                if (isFinite(m)) occBias = m;
+                return { bias: occBias };
+            },
+            probes: function (v) {
+                ensureProbes();
+                for (let i = 0; i < probes.length; i++) probes[i].enabled = !!v;
+                return { probes: !!v, count: probes.length };
             },
             eyes: function (v) {
                 eyeOn = !!v;
