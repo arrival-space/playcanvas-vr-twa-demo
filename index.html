@@ -54,7 +54,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 9;
+        const BUILD = 10;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -390,6 +390,9 @@
             /// arrive in any order, so re-evaluate the choice on every event
             /// instead of committing to one type up front. AR preferred, VR is
             /// the floor, and a timeout guarantees we never sit in the OS splash.
+            let arResolved = false;
+            const startedAt = Date.now();
+
             const tryStart = function (reason) {
                 if (sessionRequested || app.xr.active) return;
 
@@ -398,6 +401,12 @@
                     startXR(reason + ':ar');
                     return;
                 }
+
+                /// immersive-vr availability lands a beat before immersive-ar, so
+                /// don't settle for VR until AR has actually reported in — otherwise
+                /// we always lose the race and never get passthrough.
+                if (arMode && !arResolved && Date.now() - startedAt < 1500) return;
+
                 if (app.xr.isAvailable(pc.XRTYPE_VR)) {
                     sessionType = pc.XRTYPE_VR;
                     floor.enabled = true;
@@ -408,6 +417,7 @@
             [pc.XRTYPE_AR, pc.XRTYPE_VR].forEach(function (t) {
                 app.xr.on('available:' + t, function (available) {
                     console.log('[pcvr] available:' + t + ' -> ' + available);
+                    if (t === pc.XRTYPE_AR) arResolved = true;
                     btn.disabled = !(app.xr.isAvailable(pc.XRTYPE_VR) ||
                         app.xr.isAvailable(pc.XRTYPE_AR));
                     tryStart('event');
