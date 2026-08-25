@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 19;
+        const BUILD = 20;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -440,6 +440,8 @@
             const prevVp = gl.getParameter(gl.VIEWPORT);
             const prevArr = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
             const prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+            const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
+            const prevCull = gl.isEnabled(gl.CULL_FACE);
 
             gl.bindVertexArray(null);
             gl.bindFramebuffer(gl.FRAMEBUFFER, g.fbo);
@@ -447,6 +449,11 @@
             gl.useProgram(g.prog);
             gl.disable(gl.DEPTH_TEST);
             gl.disable(gl.BLEND);
+            gl.disable(gl.SCISSOR_TEST);
+            gl.disable(gl.CULL_FACE);
+            gl.colorMask(true, true, true, true);
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
 
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D_ARRAY, di.texture);
@@ -469,6 +476,8 @@
             gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
             gl.bindBuffer(gl.ARRAY_BUFFER, prevArr);
             gl.bindVertexArray(prevVao);
+            if (prevScissor) gl.enable(gl.SCISSOR_TEST);
+            if (prevCull) gl.enable(gl.CULL_FACE);
 
             if (!depthPreview) {
                 depthCanvas = document.createElement('canvas');
@@ -515,15 +524,20 @@
 
             if (!depthLogged) {
                 depthLogged = true;
-                let zero = 0;
-                let data = 0;
+                let rMin = 255, rMax = 0, bMin = 255, bMax = 0, black = 0, green = 0;
                 for (let i = 0; i < src.length; i += 4) {
-                    if (src[i] === 0 && src[i + 1] === 178) zero++;
-                    else data++;
+                    const r = src[i], g2 = src[i + 1], b = src[i + 2];
+                    if (r === 0 && g2 === 0 && b === 0) black++;
+                    if (r === 0 && g2 === 178 && b === 0) green++;
+                    if (r < rMin) rMin = r;
+                    if (r > rMax) rMax = r;
+                    if (b < bMin) bMin = b;
+                    if (b > bMax) bMax = b;
                 }
-                console.log('[pcvr] raw depth blit | layer=' + (di.imageIndex || 0) +
+                console.log('[pcvr] blit stats | layer=' + (di.imageIndex || 0) +
                     ' toMeters=' + di.rawValueToMeters +
-                    ' zeroPx=' + zero + ' dataPx=' + data);
+                    ' R[' + rMin + '-' + rMax + '] B[' + bMin + '-' + bMax + ']' +
+                    ' black=' + black + ' green=' + green + ' glErr=' + gl.getError());
             }
         }
 
