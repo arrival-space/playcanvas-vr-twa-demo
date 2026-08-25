@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 17;
+        const BUILD = 18;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -76,8 +76,10 @@
             u16: pc.XRDEPTHSENSINGFORMAT_R16U
         };
         const depthFormatPref = DFMT[urlParams.get('dfmt')] || pc.XRDEPTHSENSINGFORMAT_F32;
-        const depthUsagePref = urlParams.get('dusage') === 'cpu'
-            ? pc.XRDEPTHSENSINGUSAGE_CPU : pc.XRDEPTHSENSINGUSAGE_GPU;
+        /// CPU is the default: getDepth() is disabled under gpu-optimized, and the
+        /// GPU texture is unsampleable on Quest Browser anyway.
+        const depthUsagePref = urlParams.get('dusage') === 'gpu'
+            ? pc.XRDEPTHSENSINGUSAGE_GPU : pc.XRDEPTHSENSINGUSAGE_CPU;
         const dscaleParam = parseFloat(urlParams.get('dscale'));
         const depthScale = isFinite(dscaleParam) ? dscaleParam : 65535.0;
         /// XrManager.start() hard-rejects a type whose async isSessionSupported()
@@ -292,90 +294,85 @@
             drawPanel(lines);
         }
 
-        /// Shows the raw depth texture next to the readout. LA8 packed depth as an
-        /// emissive map is not metrically meaningful, but it moves with the room,
-        /// which is the proof we want before investing in an unpack shader.
+        /// CPU depth: view.getDepth(u, v) returns metres directly, but PlayCanvas
+        /// disables it under gpu-optimized usage. The GPU path hands back a
+        /// PIXELFORMAT_DEPTH texture that samples as exactly zero through a normal
+        /// sampler2D, so we take the CPU path and paint the grid ourselves.
+        const DEPTH_GRID = 64;
         let depthPreview = null;
+        let depthCanvas = null;
+        let depthCtx = null;
+        let depthImage = null;
+        let depthTexture = null;
+
         function bindDepthPreview() {
             const views = app.xr.views;
             if (!views.availableDepth || !views.list.length) return;
-
-            const tex = views.list[0].textureDepth;
-            if (!tex) return;
+            const view = views.list[0];
 
             if (!depthPreview) {
-                /// Depth arrives as PIXELFORMAT_DEPTH (the UA picks unsigned-short),
-                /// so .r is a 0..1 normalised uint16 — useless as a plain colour map.
-                /// Unpack to metres and false-colour it: near = warm, far = cool.
-                /// NB: no `precision` qualifier — declaring one desyncs the injected
-                /// ub_view block on 2.21 and the program silently fails to link.
-                const m = new pc.ShaderMaterial({
-                    uniqueName: 'depthPreview',
-                    attributes: {
-                        aPosition: pc.SEMANTIC_POSITION,
-                        aUv0: pc.SEMANTIC_TEXCOORD0
-                    },
-                    vertexGLSL: [
-                        'attribute vec3 aPosition;',
-                        'attribute vec2 aUv0;',
-                        'uniform mat4 matrix_model;',
-                        'uniform mat4 matrix_viewProjection;',
-                        'varying vec2 vUv0;',
-                        'void main(void) {',
-                        '    vUv0 = aUv0;',
-                        '    gl_Position = matrix_viewProjection * matrix_model * vec4(aPosition, 1.0);',
-                        '}'
-                    ].join('\n'),
-                    fragmentGLSL: [
-                        'varying vec2 vUv0;',
-                        'uniform sampler2D texture_depthSensingMap;',
-                        'uniform mat4 matrix_depth_uv;',
-                        'uniform float depth_to_meters;',
-                        'uniform float depth_scale;',
-                        'uniform float depth_mode;',
-                        'void main(void) {',
-                        '    vec2 texCoord = (matrix_depth_uv * vec4(vUv0.xy, 0.0, 1.0)).xy;',
-                        '    vec4 texel = texture2D(texture_depthSensingMap, texCoord);',
-                        '    float raw = (depth_mode > 0.5)',
-                        '        ? dot(texel.ra, vec2(255.0, 65280.0))',
-                        '        : texel.r;',
-                        /// green means the sample really is zero, which separates
-                        /// "no data reaching the shader" from "wrong scale factor"
-                        '    if (raw <= 0.0) {',
-                        '        gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);',
-                        '    } else {',
-                        '        float meters = raw * depth_to_meters * depth_scale;',
-                        '        float n = clamp(meters / 4.0, 0.0, 1.0);',
-                        '        gl_FragColor = vec4(1.0 - n, n * 0.7, n, 1.0);',
-                        '    }',
-                        '}'
-                    ].join('\n')
+                depthCanvas = document.createElement('canvas');
+                depthCanvas.width = DEPTH_GRID;
+                depthCanvas.height = DEPTH_GRID;
+                depthCtx = depthCanvas.getContext('2d');
+                depthImage = depthCtx.createImageData(DEPTH_GRID, DEPTH_GRID);
+
+                depthTexture = new pc.Texture(app.graphicsDevice, {
+                    width: DEPTH_GRID,
+                    height: DEPTH_GRID,
+                    format: pc.PIXELFORMAT_RGBA8,
+                    mipmaps: false,
+                    addressU: pc.ADDRESS_CLAMP_TO_EDGE,
+                    addressV: pc.ADDRESS_CLAMP_TO_EDGE
                 });
+                depthTexture.setSource(depthCanvas);
+
+                const m = new pc.StandardMaterial();
+                m.diffuse = new pc.Color(0, 0, 0);
+                m.emissive = new pc.Color(1, 1, 1);
+                m.emissiveMap = depthTexture;
+                m.useLighting = false;
+                m.update();
+
                 depthPreview = new pc.Entity('depth-preview');
                 depthPreview.addComponent('render', { type: 'plane', material: m, castShadows: false });
                 depthPreview.setLocalEulerAngles(90, 0, 0);
                 depthPreview.setLocalPosition(0.56, -0.28, -1.1);
                 depthPreview.setLocalScale(0.34, 1, 0.34);
                 camera.addChild(depthPreview);
+
+                console.log('[pcvr] depth preview created, gpuOptimized=' + views.depthGpuOptimized);
             }
 
-            const mat = depthPreview.render.material;
-            const view = views.list[0];
-            mat.setParameter('texture_depthSensingMap', tex);
-            mat.setParameter('matrix_depth_uv', view.depthUvMatrix.data);
-            mat.setParameter('depth_to_meters', view.depthValueToMeters || 1);
-            /// tunable from the URL (?dscale=) so the scale can be swept without
-            /// a redeploy — the raw unit is not documented for PIXELFORMAT_DEPTH
-            mat.setParameter('depth_scale', depthScale);
-            mat.setParameter('depth_mode',
-                views.depthFormat === pc.XRDEPTHSENSINGFORMAT_L8A8 ? 1 : 0);
+            const data = depthImage.data;
+            let got = 0;
+            for (let y = 0; y < DEPTH_GRID; y++) {
+                for (let x = 0; x < DEPTH_GRID; x++) {
+                    const d = view.getDepth(x / (DEPTH_GRID - 1), y / (DEPTH_GRID - 1));
+                    const i = (y * DEPTH_GRID + x) * 4;
+                    if (d === null || !isFinite(d) || d <= 0) {
+                        /// green marks "no sample here", so a dead path is obvious
+                        data[i] = 0; data[i + 1] = 180; data[i + 2] = 0;
+                    } else {
+                        got++;
+                        const n = Math.min(d / 4, 1);
+                        data[i] = Math.round(255 * (1 - n));
+                        data[i + 1] = Math.round(255 * n * 0.7);
+                        data[i + 2] = Math.round(255 * n);
+                    }
+                    data[i + 3] = 255;
+                }
+            }
+            depthCtx.putImageData(depthImage, 0, 0);
+            depthTexture.upload();
 
             if (!depthPreview.__logged) {
                 depthPreview.__logged = true;
-                console.log('[pcvr] depth bound ' + tex.width + 'x' + tex.height +
-                    ' fmt=' + views.depthFormat + ' toMeters=' + view.depthValueToMeters);
+                console.log('[pcvr] depth samples valid=' + got + '/' + (DEPTH_GRID * DEPTH_GRID) +
+                    ' centre=' + view.getDepth(0.5, 0.5));
             }
         }
+
 
         let fps = 0;
         let frameCount = 0;
