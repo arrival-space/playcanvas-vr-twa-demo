@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 58;
+        const BUILD = 59;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -931,9 +931,11 @@
 
         app.xr.on('start', function () {
             if (demoOcclusion) {
-                camera.camera.clearDepthBuffer = false;
                 loadSplat();
-                ensureProbes();
+                setTimeout(function () {
+                    ensureProbes();
+                    window.pcvr.occlude(true);
+                }, 1200);
             }
             hud.classList.add('hidden');
             /// transparent clear in AR so the real room shows behind the scene
@@ -1383,7 +1385,7 @@
                     '}'
                 ].join('\n')
             });
-            mat.setParameter('uPointSize', 6.0);
+            mat.setParameter('uPointSize', 14.0);
             mat.blendType = pc.BLEND_NONE;
             mat.update();
 
@@ -1462,6 +1464,19 @@
             cloudMesh.update(pc.PRIMITIVE_POINTS);
         }
 
+        /// colour writes off, depth writes on: an invisible occluder
+        function setCloudDepthOnly(depthOnly) {
+            if (!cloudEntity) return;
+            const m = cloudEntity.render.meshInstances[0].material;
+            m.redWrite = !depthOnly;
+            m.greenWrite = !depthOnly;
+            m.blueWrite = !depthOnly;
+            m.alphaWrite = !depthOnly;
+            m.depthWrite = true;
+            m.depthTest = true;
+            m.update();
+        }
+
         /// ---- real-world occlusion -------------------------------------
         /// Prime the depth buffer from the sensor before PlayCanvas draws the
         /// scene. Its geometry then depth-tests against the real room, so a hand
@@ -1472,7 +1487,7 @@
         ///     z_ndc = -p[10] + p[14] / d      (d = metres, right-handed, -Z fwd)
         ///     gl_FragDepth = (z_ndc + 1) * 0.5
         let occProg = null;
-        let occOn = demoOcclusion;
+        let occOn = false;
         let occBias = 0.02;          // metres, pushes real geometry slightly back
 
         function initOccProg() {
@@ -1588,7 +1603,8 @@
             if (prevScissor) gl.enable(gl.SCISSOR_TEST);
         }
 
-        app.scene.on('prerender', primeDepth);
+        /// superseded by the geometry occluder above
+        /// app.scene.on('prerender', primeDepth);
 
         /// a few probes at arm's-length depths to test the occlusion against
         let probes = null;
@@ -1607,9 +1623,18 @@
                     type: 'sphere',
                     material: material(spec[i].c[0], spec[i].c[1], spec[i].c[2], true)
                 });
-                e.setLocalPosition(spec[i].p[0], spec[i].p[1], spec[i].p[2]);
+                /// place once, in WORLD space, relative to where the viewer is
+                /// standing now - camera-parented content just rides your head
+                const wp = camera.getPosition().clone();
+                const fwd = camera.forward.clone();
+                const right = camera.right.clone();
+                const up = camera.up.clone();
+                wp.add(right.mulScalar(spec[i].p[0]));
+                wp.add(up.mulScalar(spec[i].p[1]));
+                wp.add(fwd.mulScalar(-spec[i].p[2]));
                 e.setLocalScale(0.16, 0.16, 0.16);
-                camera.addChild(e);
+                app.root.addChild(e);
+                e.setPosition(wp);
                 probes.push(e);
             }
             return probes;
@@ -1631,10 +1656,15 @@
                 splatEntity = new pc.Entity('splat');
                 splatEntity.addComponent('gsplat', { asset: asset });
                 /// most captures come in Y-down relative to PlayCanvas
-                splatEntity.setLocalEulerAngles(180, 0, 0);
-                splatEntity.setLocalPosition(0, -0.2, -1.1);
                 splatEntity.setLocalScale(0.6, 0.6, 0.6);
-                camera.addChild(splatEntity);
+                app.root.addChild(splatEntity);
+                /// drop it in the room 1.4m ahead of where you are standing
+                const wp = camera.getPosition().clone();
+                const f = camera.forward.clone().mulScalar(1.4);
+                wp.add(f);
+                wp.y -= 0.2;
+                splatEntity.setPosition(wp);
+                splatEntity.setEulerAngles(180, 0, 0);
                 splatLoading = false;
                 console.log('[pcvr] splat loaded');
                 if (cb) cb(null, splatEntity);
@@ -1733,9 +1763,19 @@
             },
             occlude: function (v) {
                 occOn = !!v;
-                /// PlayCanvas must not wipe the depth we just wrote
-                camera.camera.clearDepthBuffer = !occOn;
-                return { occlude: occOn, bias: occBias };
+                /// depth clearing stays ON - the occluder is real geometry now
+                camera.camera.clearDepthBuffer = true;
+                cloudOn = occOn;
+                if (occOn) {
+                    ensureCloud();
+                    setCloudDepthOnly(true);
+                }
+                if (cloudEntity) cloudEntity.enabled = occOn;
+                return { occlude: occOn, mode: 'geometry', points: cloudCount };
+            },
+            occluderVisible: function (v) {
+                setCloudDepthOnly(!v);
+                return { showing: !!v };
             },
             bias: function (m) {
                 if (isFinite(m)) occBias = m;
