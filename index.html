@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 46;
+        const BUILD = 47;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1077,12 +1077,17 @@
                 'void main() {\n' +
                 '    float raw = texture(uDepth, vec3(vUv, uLayer)).r * 65535.0;\n' +
                 '    if (raw <= 0.0) { discard; }\n' +
-                '    float n = clamp((raw - uLo) / max(1.0, uHi - uLo), 0.0, 1.0);\n' +
+                /// UNCLAMPED for contours and the sweep, so both keep working
+                /// past either end of the window. Clamping made every pixel
+                /// nearer than uLo collapse to n=0, which fract() turned into
+                /// one permanent band - a constant faint wash up close.
+                '    float nUn = (raw - uLo) / max(1.0, uHi - uLo);\n' +
+                '    float n = clamp(nUn, 0.0, 1.0);\n' +
                 /// topographic iso-depth contours
-                '    float ring = abs(fract(n * uBands) - 0.5) * 2.0;\n' +
+                '    float ring = abs(fract(nUn * uBands) - 0.5) * 2.0;\n' +
                 '    float contour = smoothstep(0.88, 1.0, ring);\n' +
                 /// a plane sweeping through the depth range
-                '    float dist = n - uSlice;\n' +
+                '    float dist = nUn - uSlice;\n' +
                 '    float glow = exp(-dist * dist * uSharp);\n' +
                 '    vec3 base = vec3(1.0 - n, n * 0.55, n);\n' +
                 '    vec3 col = base * 0.55 + vec3(0.25, 0.55, 0.75) * contour;\n' +
