@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 38;
+        const BUILD = 39;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -737,6 +737,17 @@
             depthCtx.putImageData(depthImage, 0, 0);
             depthTexture.upload();
 
+            if (cloudOn) {
+                try {
+                    updateCloud(views.list[di.imageIndex || 0], src);
+                } catch (e) {
+                    if (!depthErrLogged) {
+                        depthErrLogged = true;
+                        console.log('[pcvr] cloud update failed: ' + e.message);
+                    }
+                }
+            }
+
             const ci = ((DEPTH_H >> 1) * DEPTH_W + (DEPTH_W >> 1)) * 4;
             lastDepthRaw = src[ci] * 256 + src[ci + 1];
             lastDepthCentre = lastDepthRaw * depthScale;
@@ -922,6 +933,126 @@
             rig.rotate(0, 4 * dt, 0);
         });
 
+        /// ---- world-space depth reconstruction ----
+        const CLOUD_STEP = 3;                     // sample every Nth texel
+        let cloudEntity = null;
+        let cloudMesh = null;
+        let cloudPos = null;
+        let cloudCol = null;
+        let cloudCount = 0;
+        let cloudOn = false;
+
+        function ensureCloud() {
+            if (cloudEntity) return cloudEntity;
+
+            const gw = Math.floor(DEPTH_W / CLOUD_STEP);
+            const gh = Math.floor(DEPTH_H / CLOUD_STEP);
+            cloudCount = gw * gh;
+            cloudPos = new Float32Array(cloudCount * 3);
+            cloudCol = new Float32Array(cloudCount * 4);
+
+            const mat = new pc.ShaderMaterial({
+                uniqueName: 'depthCloud',
+                attributes: {
+                    aPosition: pc.SEMANTIC_POSITION,
+                    aColor: pc.SEMANTIC_COLOR
+                },
+                vertexGLSL: [
+                    'attribute vec3 aPosition;',
+                    'attribute vec4 aColor;',
+                    'uniform mat4 matrix_model;',
+                    'uniform mat4 matrix_viewProjection;',
+                    'uniform float uPointSize;',
+                    'varying vec4 vColor;',
+                    'void main(void) {',
+                    '    vColor = aColor;',
+                    '    gl_Position = matrix_viewProjection * matrix_model * vec4(aPosition, 1.0);',
+                    '    gl_PointSize = uPointSize;',
+                    '}'
+                ].join('\n'),
+                fragmentGLSL: [
+                    'varying vec4 vColor;',
+                    'void main(void) {',
+                    '    gl_FragColor = vColor;',
+                    '}'
+                ].join('\n')
+            });
+            mat.setParameter('uPointSize', 6.0);
+            mat.blendType = pc.BLEND_NONE;
+            mat.update();
+
+            cloudMesh = new pc.Mesh(app.graphicsDevice);
+            cloudMesh.clear(true, false);
+            cloudMesh.setPositions(cloudPos);
+            cloudMesh.setColors(cloudCol, 4);
+            cloudMesh.update(pc.PRIMITIVE_POINTS);
+
+            const node = new pc.GraphNode();
+            const mi = new pc.MeshInstance(cloudMesh, mat, node);
+            mi.cull = false;
+
+            cloudEntity = new pc.Entity('depth-cloud');
+            cloudEntity.addComponent('render', { meshInstances: [mi] });
+            app.root.addChild(cloudEntity);
+            console.log('[pcvr] depth cloud created, points=' + cloudCount);
+            return cloudEntity;
+        }
+
+        /// unproject the depth buffer through the eye that captured it
+        function updateCloud(view, src) {
+            ensureCloud();
+            const pm = view.projMat.data;
+            const inv = view.viewInvMat;
+            const sx = pm[0], sy = pm[5], kx = pm[8], ky = pm[9];
+
+            const gw = Math.floor(DEPTH_W / CLOUD_STEP);
+            const gh = Math.floor(DEPTH_H / CLOUD_STEP);
+            const rowBytes = DEPTH_W * 4;
+            const tmp = new pc.Vec3();
+            let n = 0;
+
+            for (let gy = 0; gy < gh; gy++) {
+                const ty = gy * CLOUD_STEP;
+                const s0 = (DEPTH_H - 1 - ty) * rowBytes;
+                for (let gx = 0; gx < gw; gx++) {
+                    const tx = gx * CLOUD_STEP;
+                    const si = s0 + tx * 4;
+                    const q = src[si] * 256 + src[si + 1];
+                    const i3 = n * 3;
+                    const i4 = n * 4;
+                    n++;
+
+                    if (q === 0) {
+                        cloudCol[i4 + 3] = 0;
+                        continue;
+                    }
+
+                    const d = q * depthScale;
+                    /// ndc -> view space using this eye's frustum
+                    const ndcX = (tx / (DEPTH_W - 1)) * 2 - 1;
+                    const ndcY = (ty / (DEPTH_H - 1)) * 2 - 1;
+                    tmp.x = d * (ndcX - kx) / sx;
+                    tmp.y = d * (ndcY - ky) / sy;
+                    tmp.z = -d;
+                    inv.transformPoint(tmp, tmp);
+
+                    cloudPos[i3] = tmp.x;
+                    cloudPos[i3 + 1] = tmp.y;
+                    cloudPos[i3 + 2] = tmp.z;
+
+                    const t = Math.min(d / 4, 1);
+                    cloudCol[i4] = 1 - t;
+                    cloudCol[i4 + 1] = t * 0.7;
+                    cloudCol[i4 + 2] = t;
+                    cloudCol[i4 + 3] = 1;
+                }
+            }
+
+            cloudMesh.setPositions(cloudPos);
+            cloudMesh.setColors(cloudCol, 4);
+            cloudMesh.update(pc.PRIMITIVE_POINTS);
+        }
+
         /// Live tuning surface. Everything below is driven over the DevTools
         /// connection, so geometry can be adjusted on the running session instead
         /// of going round the deploy/cache/relaunch loop for every value.
@@ -975,6 +1106,20 @@
                 for (let i = 0; i < cubes.length; i++) cubes[i].entity.enabled = !!v;
                 return { cubes: !!v };
             },
+            /// world-space reconstruction - correct in BOTH eyes
+            cloud: function (v, step) {
+                cloudOn = !!v;
+                if (cloudOn) ensureCloud();
+                if (cloudEntity) cloudEntity.enabled = cloudOn;
+                if (depthPreview && cloudOn) depthPreview.enabled = false;
+                return { cloud: cloudOn, points: cloudCount };
+            },
+            pointSize: function (px) {
+                if (!cloudEntity) return 'no cloud';
+                cloudEntity.render.meshInstances[0].material.setParameter('uPointSize', px);
+                return { pointSize: px };
+            },
+
             /// readings
             stats: function () {
                 return {
