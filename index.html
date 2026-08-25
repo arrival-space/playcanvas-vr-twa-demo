@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 41;
+        const BUILD = 42;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -84,6 +84,17 @@
             ? pc.XRDEPTHSENSINGUSAGE_GPU : pc.XRDEPTHSENSINGUSAGE_CPU;
         const dscaleParam = parseFloat(urlParams.get('dscale'));
         let depthScale = isFinite(dscaleParam) ? dscaleParam : (8 / 65535);
+        /// Quest hands back NON-LINEAR projective depth: values bunch near the top
+        /// of the range. Convert with the z-buffer relation instead of a scale.
+        let depthNear = 0.1;
+        let depthFar = 8.0;
+        let depthProjective = true;
+        function rawToMetres(q) {
+            if (!depthProjective) return q * depthScale;
+            const z = q / 65535;
+            const inv = (1 / depthNear) - z * ((1 / depthNear) - (1 / depthFar));
+            return inv > 0.0001 ? (1 / inv) : depthFar;
+        }
         /// XrManager.start() hard-rejects a type whose async isSessionSupported()
         /// has not resolved yet, so availability must be tracked for the type we
         /// actually intend to start — not just immersive-vr.
@@ -721,7 +732,7 @@
                     const sx = depthMirror ? (DEPTH_W - 1 - x) : x;
                     const si = s0 + sx * 4;
                     const q = src[si] * 256 + src[si + 1];
-                    const d = q * depthScale;
+                    const d = rawToMetres(q);
                     const i = (y * DEPTH_W + x) * 4;
                     if (q === 0) {
                         px[i] = 0; px[i + 1] = 180; px[i + 2] = 0;
@@ -755,7 +766,7 @@
 
             const ci = ((DEPTH_H >> 1) * DEPTH_W + (DEPTH_W >> 1)) * 4;
             lastDepthRaw = src[ci] * 256 + src[ci + 1];
-            lastDepthCentre = lastDepthRaw * depthScale;
+            lastDepthCentre = rawToMetres(lastDepthRaw);
 
             /// histogram every ~2s: min/max hid whether this is graded or binary
             if (time0 - lastHist > 2000) {
@@ -1035,7 +1046,7 @@
                         continue;
                     }
 
-                    const d = q * depthScale;
+                    const d = rawToMetres(q);
                     /// ndc -> view space using this eye's frustum
                     const ndcX = (tx / (DEPTH_W - 1)) * 2 - 1;
                     const ndcY = (ty / (DEPTH_H - 1)) * 2 - 1;
@@ -1122,6 +1133,15 @@
                 if (depthPreview && cloudOn) depthPreview.enabled = false;
                 return { cloud: cloudOn, points: cloudCount };
             },
+            nearFar: function (n, f) {
+                if (isFinite(n)) depthNear = n;
+                if (isFinite(f)) depthFar = f;
+                return { near: depthNear, far: depthFar, projective: depthProjective };
+            },
+            projective: function (v) {
+                depthProjective = !!v;
+                return { projective: depthProjective };
+            },
             pointSize: function (px) {
                 if (!cloudEntity) return 'no cloud';
                 cloudEntity.render.meshInstances[0].material.setParameter('uPointSize', px);
@@ -1136,7 +1156,7 @@
                     raw: lastDepthRaw,
                     rawLo: lastRawLo,
                     rawHi: lastRawHi,
-                    metres: lastDepthRaw * depthScale,
+                    metres: rawToMetres(lastDepthRaw),
                     scale: depthScale,
                     dist: depthDist,
                     size: depthSize,
@@ -1153,7 +1173,7 @@
                 const y = Math.max(0, Math.min(DEPTH_H - 1, Math.round(v * (DEPTH_H - 1))));
                 const i = ((DEPTH_H - 1 - y) * DEPTH_W + x) * 4;
                 const q = depthPixels[i] * 256 + depthPixels[i + 1];
-                return { raw: q, metres: q * depthScale };
+                return { raw: q, metres: rawToMetres(q) };
             }
         };
         console.log('[pcvr] live control surface ready: window.pcvr');
