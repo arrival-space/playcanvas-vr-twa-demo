@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 36;
+        const BUILD = 37;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -311,7 +311,7 @@
                     lines.push('raw ctr   : ' + lastDepthRaw);
                     lines.push('raw range : ' + lastRawLo + ' .. ' + lastRawHi);
                     lines.push('overlay   : d=' + depthDist + ' s=' + depthSize +
-                        ' op=' + depthOpacity);
+                        ' flip=' + (depthFlip ? 1 : 0) + ' mir=' + (depthMirror ? 1 : 0));
                     lines.push('dist      : ' + (lastDepthCentre
                         ? lastDepthCentre.toFixed(3) + ' m' : 'no reading'));
                     bindDepthPreview();
@@ -364,6 +364,8 @@
         const depthDist = isFinite(ddistParam) ? ddistParam : 2.5;
         const dsizeParam = parseFloat(new URLSearchParams(location.search).get('dsize'));
         const depthSize = isFinite(dsizeParam) ? dsizeParam : 0.6;
+        const depthFlip = new URLSearchParams(location.search).get('dflip') !== '0';
+        const depthMirror = new URLSearchParams(location.search).get('dmirror') === '1';
         const allowGpuBlit = true;
 
         function startDepthFrameLoop() {
@@ -706,9 +708,13 @@
             lastRawHi = qHi;
 
             for (let y = 0; y < DEPTH_H; y++) {
-                const s0 = (DEPTH_H - 1 - y) * rowBytes;
+                /// readPixels is bottom-up and ImageData is top-down, but the XR
+                /// depth texture may already be oriented - ?dflip=0 to compare
+                const sy = depthFlip ? (DEPTH_H - 1 - y) : y;
+                const s0 = sy * rowBytes;
                 for (let x = 0; x < DEPTH_W; x++) {
-                    const si = s0 + x * 4;
+                    const sx = depthMirror ? (DEPTH_W - 1 - x) : x;
+                    const si = s0 + sx * 4;
                     const q = src[si] * 256 + src[si + 1];
                     const d = q * depthScale;
                     const i = (y * DEPTH_W + x) * 4;
