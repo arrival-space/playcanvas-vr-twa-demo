@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 49;
+        const BUILD = 50;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1045,10 +1045,10 @@
         let lastDi = null;
         let sweepSpeed = 0.25;
         let sweepFixed = 0.5;
-        let sweepBands = 24.0;
-        let sweepSharp = 900.0;
-        let sweepRawLo = 0;
-        let sweepRawHi = 65535;
+        let sweepBands = 4.0;
+        let sweepSharp = 260.0;
+        let sweepDistLo = 0.15;
+        let sweepDistHi = 6.0;
 
         function initEyeProg() {
             const gl = app.graphicsDevice.gl;
@@ -1074,6 +1074,9 @@
                 'uniform float uSlice;\n' +
                 'uniform float uBands;\n' +
                 'uniform float uSharp;\n' +
+                'uniform float uNear;\n' +
+                'uniform float uFar;\n' +
+                'uniform float uSliceM;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
                 'void main() {\n' +
@@ -1086,10 +1089,17 @@
                 '    float nUn = (raw - uLo) / max(1.0, uHi - uLo);\n' +
                 '    float n = clamp(nUn, 0.0, 1.0);\n' +
                 /// topographic iso-depth contours
-                '    float ring = abs(fract(nUn * uBands) - 0.5) * 2.0;\n' +
+                /// convert the projective value to metres, then do the sweep and
+                /// the contours in METRIC space. In raw space the near field eats
+                /// most of the range, so a linear sweep crawls up close and races
+                /// away in the distance - and the band is thin near, fat far.
+                '    float zz = raw / 65535.0;\n' +
+                '    float invd = (1.0 / uNear) - zz * ((1.0 / uNear) - (1.0 / uFar));\n' +
+                '    float dm = 1.0 / max(invd, 0.0001);\n' +
+                '    float ring = abs(fract(dm * uBands) - 0.5) * 2.0;\n' +
                 '    float contour = smoothstep(0.88, 1.0, ring);\n' +
                 /// a plane sweeping through the depth range
-                '    float dist = nUn - uSlice;\n' +
+                '    float dist = dm - uSliceM;\n' +
                 '    float glow = exp(-dist * dist * uSharp);\n' +
                 '    vec3 base = vec3(1.0 - n, n * 0.55, n);\n' +
                 '    vec3 col = base * 0.55 + vec3(0.25, 0.55, 0.75) * contour;\n' +
@@ -1120,7 +1130,10 @@
                 uAlpha: gl.getUniformLocation(prog, 'uAlpha'),
                 uSlice: gl.getUniformLocation(prog, 'uSlice'),
                 uBands: gl.getUniformLocation(prog, 'uBands'),
-                uSharp: gl.getUniformLocation(prog, 'uSharp')
+                uSharp: gl.getUniformLocation(prog, 'uSharp'),
+                uNear: gl.getUniformLocation(prog, 'uNear'),
+                uFar: gl.getUniformLocation(prog, 'uFar'),
+                uSliceM: gl.getUniformLocation(prog, 'uSliceM')
             };
             console.log('[pcvr] per-eye composite program ready');
             return eyeProg;
@@ -1173,11 +1186,15 @@
             const phase = sweepSpeed > 0
                 ? ((lastFrameTime * 0.001 * sweepSpeed) % 1.0)
                 : sweepFixed;
-            const sweepRaw = sweepRawLo + (sweepRawHi - sweepRawLo) * phase;
-            const sweep = (sweepRaw - eyeLo) / Math.max(1, eyeHi - eyeLo);
-            gl.uniform1f(g.uSlice, sweep);
+            /// linear in metres, so the bolt travels at a constant real-world
+            /// speed and keeps a constant real-world thickness
+            const sliceM = sweepDistLo + (sweepDistHi - sweepDistLo) * phase;
+            gl.uniform1f(g.uSlice, 0.0);
             gl.uniform1f(g.uBands, sweepBands);
             gl.uniform1f(g.uSharp, sweepSharp);
+            gl.uniform1f(g.uNear, depthNear);
+            gl.uniform1f(g.uFar, depthFar);
+            gl.uniform1f(g.uSliceM, sliceM);
 
             for (let i = 0; i < views.length; i++) {
                 const vp = views[i].viewport;
@@ -1393,9 +1410,9 @@
                 return { perEye: eyeOn };
             },
             sweepRange: function (lo, hi) {
-                if (isFinite(lo)) sweepRawLo = lo;
-                if (isFinite(hi)) sweepRawHi = hi;
-                return { rawLo: sweepRawLo, rawHi: sweepRawHi };
+                if (isFinite(lo)) sweepDistLo = lo;
+                if (isFinite(hi)) sweepDistHi = hi;
+                return { metresLo: sweepDistLo, metresHi: sweepDistHi };
             },
             sweep: function (speed) {
                 if (isFinite(speed)) sweepSpeed = speed;
