@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>PlayCanvas VR Demo</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <meta name="theme-color" content="#1a8fe3" />
+    <link rel="icon" href="icon-192.png" />
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #05070d; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #hud {
+            position: fixed; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 24px;
+            font: 400 16px/1.5 system-ui, sans-serif; color: #cfd8e6;
+            pointer-events: none;
+        }
+        #hud h1 { margin: 0; font-size: 28px; font-weight: 600; color: #fff; letter-spacing: -0.01em; }
+        #enter {
+            pointer-events: auto; padding: 18px 40px; font-size: 20px; font-weight: 600;
+            color: #05070d; background: #1a8fe3; border: 0; border-radius: 999px; cursor: pointer;
+        }
+        #enter[disabled] { background: #2b3242; color: #6b7688; cursor: default; }
+        #status { font-size: 14px; color: #7d8ba3; max-width: 32ch; text-align: center; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <script src="playcanvas.min.js"></script>
+    <div id="hud">
+        <h1>PlayCanvas VR Demo</h1>
+        <button id="enter">Enter VR</button>
+        <div id="status">checking WebXR support&hellip;</div>
+    </div>
+    <script>
+    (function () {
+        const canvas = document.createElement('canvas');
+        document.body.insertBefore(canvas, document.body.firstChild);
+
+        const app = new pc.Application(canvas, {
+            mouse: new pc.Mouse(canvas),
+            touch: new pc.TouchDevice(canvas),
+            keyboard: new pc.Keyboard(window),
+            graphicsDeviceOptions: { antialias: true, alpha: false }
+        });
+        app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
+        app.setCanvasResolution(pc.RESOLUTION_AUTO);
+        window.addEventListener('resize', () => app.resizeCanvas());
+
+        app.scene.ambientLight = new pc.Color(0.12, 0.14, 0.2);
+
+        /// camera lives under a rig so we can move the player without fighting
+        /// the headset pose the XR system writes onto the camera itself.
+        const rig = new pc.Entity('rig');
+        app.root.addChild(rig);
+
+        const camera = new pc.Entity('camera');
+        camera.addComponent('camera', {
+            clearColor: new pc.Color(0.02, 0.03, 0.05),
+            farClip: 200
+        });
+        camera.setLocalPosition(0, 1.6, 0);
+        rig.addChild(camera);
+
+        const light = new pc.Entity('key-light');
+        light.addComponent('light', {
+            type: 'directional', color: new pc.Color(1, 0.96, 0.9),
+            intensity: 1.6, castShadows: true, shadowBias: 0.2,
+            normalOffsetBias: 0.05, shadowDistance: 40
+        });
+        light.setEulerAngles(50, 30, 0);
+        app.root.addChild(light);
+
+        const fill = new pc.Entity('fill-light');
+        fill.addComponent('light', { type: 'omni', color: new pc.Color(0.3, 0.5, 1), intensity: 2, range: 20 });
+        fill.setPosition(0, 3, -4);
+        app.root.addChild(fill);
+
+        function material(r, g, b, emissive) {
+            const m = new pc.StandardMaterial();
+            m.diffuse = new pc.Color(r, g, b);
+            m.gloss = 0.7;
+            m.metalness = 0.1;
+            m.useMetalness = true;
+            if (emissive) {
+                m.emissive = new pc.Color(r, g, b);
+                m.emissiveIntensity = 0.6;
+            }
+            m.update();
+            return m;
+        }
+
+        const floor = new pc.Entity('floor');
+        floor.addComponent('render', { type: 'plane', material: material(0.09, 0.1, 0.13) });
+        floor.setLocalScale(40, 1, 40);
+        app.root.addChild(floor);
+
+        /// a ring of cubes at eye height — easy to tell at a glance whether
+        /// stereo rendering and head tracking are actually live.
+        const cubes = [];
+        const COUNT = 12;
+        for (let i = 0; i < COUNT; i++) {
+            const a = (i / COUNT) * Math.PI * 2;
+            const hue = (i / COUNT) * Math.PI * 2;
+            const cube = new pc.Entity('cube' + i);
+            cube.addComponent('render', {
+                type: 'box',
+                material: material(
+                    0.5 + 0.5 * Math.sin(hue),
+                    0.5 + 0.5 * Math.sin(hue + 2.09),
+                    0.5 + 0.5 * Math.sin(hue + 4.19),
+                    true
+                )
+            });
+            cube.setPosition(Math.sin(a) * 3.5, 1.4, Math.cos(a) * 3.5);
+            cube.setLocalScale(0.5, 0.5, 0.5);
+            app.root.addChild(cube);
+            cubes.push({ entity: cube, phase: a });
+        }
+
+        let t = 0;
+        app.on('update', function (dt) {
+            t += dt;
+            for (let i = 0; i < cubes.length; i++) {
+                const c = cubes[i];
+                c.entity.rotate(20 * dt, 40 * dt, 0);
+                const p = c.entity.getPosition();
+                c.entity.setPosition(p.x, 1.4 + Math.sin(t * 1.5 + c.phase) * 0.35, p.z);
+            }
+        });
+
+        /// ---- controller / hand input: draw a ray from each input source ----
+        const rays = new Map();
+        function addInputSource(inputSource) {
+            const e = new pc.Entity('ray');
+            e.addComponent('render', { type: 'box', material: material(0.9, 0.9, 1, true) });
+            e.setLocalScale(0.012, 0.012, 1.2);
+            app.root.addChild(e);
+            rays.set(inputSource, e);
+        }
+        function removeInputSource(inputSource) {
+            const e = rays.get(inputSource);
+            if (e) { e.destroy(); rays.delete(inputSource); }
+        }
+        if (app.xr && app.xr.input) {
+            app.xr.input.on('add', addInputSource);
+            app.xr.input.on('remove', removeInputSource);
+        }
+        app.on('update', function () {
+            rays.forEach(function (e, inputSource) {
+                const o = inputSource.getOrigin();
+                const d = inputSource.getDirection();
+                e.setPosition(o.x + d.x * 0.6, o.y + d.y * 0.6, o.z + d.z * 0.6);
+                e.lookAt(o.x + d.x, o.y + d.y, o.z + d.z);
+            });
+        });
+
+        /// ---- session plumbing ----
+        const hud = document.getElementById('hud');
+        const btn = document.getElementById('enter');
+        const status = document.getElementById('status');
+
+        function setStatus(msg) { status.textContent = msg; }
+
+        function startXR() {
+            app.xr.start(camera.camera, pc.XRTYPE_VR, pc.XRSPACE_LOCALFLOOR, {
+                callback: function (err) {
+                    if (err) setStatus('could not start session: ' + err.message);
+                }
+            });
+        }
+
+        app.xr.on('start', function () { hud.classList.add('hidden'); });
+        app.xr.on('end', function () {
+            hud.classList.remove('hidden');
+            setStatus('session ended — tap to re-enter');
+        });
+
+        btn.addEventListener('click', startXR);
+
+        if (!app.xr.supported) {
+            btn.disabled = true;
+            setStatus('this browser has no WebXR — the demo still runs flat');
+        } else {
+            app.xr.on('available:' + pc.XRTYPE_VR, function (available) {
+                btn.disabled = !available;
+                setStatus(available ? 'immersive-vr available' : 'no immersive-vr device');
+            });
+            const available = app.xr.isAvailable(pc.XRTYPE_VR);
+            btn.disabled = !available;
+            setStatus(available ? 'immersive-vr available' : 'checking for a headset…');
+
+            /// Meta packages an "immersive" PWA so it launches straight into the
+            /// session — the launch itself carries the activation, so try once on
+            /// load and fall back to the button when it is refused.
+            if (available) {
+                setTimeout(startXR, 250);
+            }
+        }
+
+        /// flat fallback: slow orbit so a desktop / 2D launch is not a dead screen
+        app.on('update', function (dt) {
+            if (app.xr.active) return;
+            rig.rotate(0, 4 * dt, 0);
+        });
+
+        app.start();
+    })();
+    </script>
+</body>
+</html>

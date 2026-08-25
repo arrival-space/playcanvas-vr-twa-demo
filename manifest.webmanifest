@@ -1,0 +1,17 @@
+{
+    "name": "PlayCanvas VR Demo",
+    "short_name": "PC VR Demo",
+    "description": "A minimal PlayCanvas WebXR scene, packaged as a Meta Horizon TWA.",
+    "start_url": "./index.html",
+    "scope": "./",
+    "id": "/",
+    "display": "standalone",
+    "orientation": "any",
+    "theme_color": "#1a8fe3",
+    "background_color": "#05070d",
+    "icons": [
+        { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+        { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+        { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    ]
+}
