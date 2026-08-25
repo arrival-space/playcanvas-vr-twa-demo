@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 54;
+        const BUILD = 55;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1052,7 +1052,8 @@
         let sweepEase = 2.0;
         let fireDist = 0.7;
         let fineBands = 45.0;   // rings per metre in the near field (~2cm)
-        let edgeAmt = 0.9;
+        let edgeAmt = 0.25;
+        let shadeAmt = 260.0;
 
         function initEyeProg() {
             const gl = app.graphicsDevice.gl;
@@ -1085,6 +1086,7 @@
                 'uniform float uFireDist;\n' +
                 'uniform float uFineBands;\n' +
                 'uniform float uEdge;\n' +
+                'uniform float uShade;\n' +
                 'uniform float uTexel;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
@@ -1118,6 +1120,13 @@
                 '    float rD = texture(uDepth, vec3(vUv + vec2(0.0, uTexel), uLayer)).r;\n' +
                 '    float grad = abs(rR - rL) + abs(rD - rU);\n' +
                 '    float edge = smoothstep(0.0015, 0.010, grad) * uEdge;\n' +
+                /// crude surface normal straight from the depth slopes, lit from
+                /// upper-left. Gives the burning region real shading instead of a
+                /// flat glow - knuckles and finger curvature start to read.
+                '    vec3 nrm = normalize(vec3(-(rR - rL) * uShade, -(rD - rU) * uShade, 1.0));\n' +
+                '    float lam = clamp(dot(nrm, normalize(vec3(-0.45, -0.55, 0.70))), 0.0, 1.0);\n' +
+                '    float shade = 0.45 + 0.85 * lam;\n' +
+                '    float rim = pow(1.0 - abs(nrm.z), 2.0);\n' +
                 '    float contour = smoothstep(0.88, 1.0, ring);\n' +
                 /// a plane sweeping through the depth range
                 '    float dist = dm - uSliceM;\n' +
@@ -1136,8 +1145,8 @@
                 '    float flick = 0.86 + 0.14 * sin(uTime * 19.0 + dm * 26.0 + vUv.y * 37.0);\n' +
                 '    vec3 haloCol = mix(vec3(0.35, 0.85, 1.0), vec3(1.00, 0.38, 0.06) * flick, fire);\n' +
                 '    vec3 coreCol = mix(vec3(1.0, 1.0, 1.0), vec3(1.00, 0.88, 0.55), fire);\n' +
-                '    col += haloCol * glow;\n' +
-                '    col += coreCol * core * 1.4;\n' +
+                '    col += haloCol * glow * shade + haloCol * glow * rim * 0.6;\n' +
+                '    col += coreCol * core * 1.4 * (0.55 + 0.75 * lam);\n' +
                 '    float a = uAlpha * (0.30 + 0.70 * glow + 0.9 * core + 0.35 * contour + 0.30 * fineC + 0.55 * edge);\n' +
                 '    fragColor = vec4(col, clamp(a, 0.0, 1.0));\n' +
                 '}\n');
@@ -1293,6 +1302,7 @@
             gl.uniform1f(g.uFireDist, fireDist);
             gl.uniform1f(g.uFineBands, fineBands);
             gl.uniform1f(g.uEdge, edgeAmt);
+            gl.uniform1f(g.uShade, shadeAmt);
             gl.uniform1f(g.uTexel, 1.0 / DEPTH_W);
 
             for (let i = 0; i < views.length; i++) {
@@ -1529,6 +1539,10 @@
                 if (isFinite(bands)) fineBands = bands;
                 if (isFinite(edge)) edgeAmt = edge;
                 return { fineBands: fineBands, edge: edgeAmt };
+            },
+            shade: function (k) {
+                if (isFinite(k)) shadeAmt = k;
+                return { shade: shadeAmt };
             },
             fire: function (m) {
                 if (isFinite(m)) fireDist = m;
