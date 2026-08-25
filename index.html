@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 37;
+        const BUILD = 38;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -81,7 +81,7 @@
         const depthUsagePref = urlParams.get('dusage') === 'gpu'
             ? pc.XRDEPTHSENSINGUSAGE_GPU : pc.XRDEPTHSENSINGUSAGE_CPU;
         const dscaleParam = parseFloat(urlParams.get('dscale'));
-        const depthScale = isFinite(dscaleParam) ? dscaleParam : (8 / 65535);
+        let depthScale = isFinite(dscaleParam) ? dscaleParam : (8 / 65535);
         /// XrManager.start() hard-rejects a type whose async isSessionSupported()
         /// has not resolved yet, so availability must be tracked for the type we
         /// actually intend to start — not just immersive-vr.
@@ -359,13 +359,13 @@
         let lastRawHi = 0;
         const depthOverlay = new URLSearchParams(location.search).get('doverlay') !== '0';
         const dopParam = parseFloat(new URLSearchParams(location.search).get('dop'));
-        const depthOpacity = isFinite(dopParam) ? dopParam : 0.75;
+        let depthOpacity = isFinite(dopParam) ? dopParam : 0.75;
         const ddistParam = parseFloat(new URLSearchParams(location.search).get('ddist'));
-        const depthDist = isFinite(ddistParam) ? ddistParam : 2.5;
+        let depthDist = isFinite(ddistParam) ? ddistParam : 2.5;
         const dsizeParam = parseFloat(new URLSearchParams(location.search).get('dsize'));
-        const depthSize = isFinite(dsizeParam) ? dsizeParam : 0.6;
-        const depthFlip = new URLSearchParams(location.search).get('dflip') !== '0';
-        const depthMirror = new URLSearchParams(location.search).get('dmirror') === '1';
+        let depthSize = isFinite(dsizeParam) ? dsizeParam : 0.6;
+        let depthFlip = new URLSearchParams(location.search).get('dflip') !== '0';
+        let depthMirror = new URLSearchParams(location.search).get('dmirror') === '1';
         const allowGpuBlit = true;
 
         function startDepthFrameLoop() {
@@ -921,6 +921,89 @@
             if (app.xr.active) return;
             rig.rotate(0, 4 * dt, 0);
         });
+
+        /// Live tuning surface. Everything below is driven over the DevTools
+        /// connection, so geometry can be adjusted on the running session instead
+        /// of going round the deploy/cache/relaunch loop for every value.
+        function applyOverlayTransform() {
+            if (!depthPreview) return 'no overlay yet';
+            if (depthOverlay) {
+                const fovRad = (camera.camera.fov || 60) * Math.PI / 180;
+                const h = 2 * depthDist * Math.tan(fovRad / 2) * depthSize;
+                const w = h * 1.6;
+                depthPreview.setLocalPosition(0, 0, -depthDist);
+                depthPreview.setLocalScale(w, 1, h);
+                const m = depthPreview.render.material;
+                m.opacity = depthOpacity;
+                m.update();
+            }
+            return { dist: depthDist, size: depthSize, opacity: depthOpacity };
+        }
+
+        window.pcvr = {
+            /// geometry
+            place: function (d, sz) {
+                if (isFinite(d)) depthDist = d;
+                if (isFinite(sz)) depthSize = sz;
+                return applyOverlayTransform();
+            },
+            opacity: function (o) {
+                if (isFinite(o)) depthOpacity = o;
+                return applyOverlayTransform();
+            },
+            nudge: function (dx, dy) {
+                if (!depthPreview) return 'no overlay yet';
+                const p = depthPreview.getLocalPosition();
+                depthPreview.setLocalPosition(p.x + (dx || 0), p.y + (dy || 0), p.z);
+                return { x: p.x + (dx || 0), y: p.y + (dy || 0), z: p.z };
+            },
+            /// image orientation
+            flip: function (v) { depthFlip = !!v; return { flip: depthFlip }; },
+            mirror: function (v) { depthMirror = !!v; return { mirror: depthMirror }; },
+            /// depth units
+            scale: function (v) { if (isFinite(v)) depthScale = v; return { scale: depthScale }; },
+            /// visibility
+            show: function (v) {
+                if (depthPreview) depthPreview.enabled = !!v;
+                return { visible: !!v };
+            },
+            panel: function (v) {
+                panel.enabled = !!v;
+                return { panel: !!v };
+            },
+            cubes: function (v) {
+                for (let i = 0; i < cubes.length; i++) cubes[i].entity.enabled = !!v;
+                return { cubes: !!v };
+            },
+            /// readings
+            stats: function () {
+                return {
+                    build: BUILD,
+                    xr: app.xr.type,
+                    raw: lastDepthRaw,
+                    rawLo: lastRawLo,
+                    rawHi: lastRawHi,
+                    metres: lastDepthRaw * depthScale,
+                    scale: depthScale,
+                    dist: depthDist,
+                    size: depthSize,
+                    opacity: depthOpacity,
+                    flip: depthFlip,
+                    mirror: depthMirror,
+                    fps: Math.round(fps)
+                };
+            },
+            /// depth at an arbitrary point of the map, 0..1 normalised
+            at: function (u, v) {
+                if (!depthPixels) return null;
+                const x = Math.max(0, Math.min(DEPTH_W - 1, Math.round(u * (DEPTH_W - 1))));
+                const y = Math.max(0, Math.min(DEPTH_H - 1, Math.round(v * (DEPTH_H - 1))));
+                const i = ((DEPTH_H - 1 - y) * DEPTH_W + x) * 4;
+                const q = depthPixels[i] * 256 + depthPixels[i + 1];
+                return { raw: q, metres: q * depthScale };
+            }
+        };
+        console.log('[pcvr] live control surface ready: window.pcvr');
 
         app.start();
     })();
