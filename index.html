@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 59;
+        const BUILD = 60;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1342,7 +1342,7 @@
         app.on('postrender', compositeEyes);
 
         /// ---- world-space depth reconstruction ----
-        const CLOUD_STEP = 3;                     // sample every Nth texel
+        const CLOUD_STEP = 2;                     // sample every Nth texel
         let cloudEntity = null;
         let cloudMesh = null;
         let cloudPos = null;
@@ -1386,7 +1386,10 @@
                 ].join('\n')
             });
             mat.setParameter('uPointSize', 14.0);
-            mat.blendType = pc.BLEND_NONE;
+            mat.blendType = pc.BLEND_NORMAL;
+            mat.depthWrite = true;
+            mat.depthTest = true;
+            mat.setParameter('uVisible', 0.0);
             mat.update();
 
             cloudMesh = new pc.Mesh(app.graphicsDevice);
@@ -1468,10 +1471,8 @@
         function setCloudDepthOnly(depthOnly) {
             if (!cloudEntity) return;
             const m = cloudEntity.render.meshInstances[0].material;
-            m.redWrite = !depthOnly;
-            m.greenWrite = !depthOnly;
-            m.blueWrite = !depthOnly;
-            m.alphaWrite = !depthOnly;
+            /// transparent fragments still write depth - an invisible occluder
+            m.setParameter('uVisible', depthOnly ? 0.0 : 1.0);
             m.depthWrite = true;
             m.depthTest = true;
             m.update();
