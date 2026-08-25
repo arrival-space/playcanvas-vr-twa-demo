@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 16;
+        const BUILD = 17;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -68,6 +68,16 @@
         /// VR is the default: a plain launch must always come up. AR/depth is
         /// opt-in via ?mode=ar so an experiment can never break the base demo.
         const arMode = urlParams.get('mode') === 'ar';
+        /// PIXELFORMAT_DEPTH (unsigned-short) samples as zero through a normal
+        /// sampler2D, so allow the format/usage to be swept from the URL.
+        const DFMT = {
+            f32: pc.XRDEPTHSENSINGFORMAT_F32,
+            la8: pc.XRDEPTHSENSINGFORMAT_L8A8,
+            u16: pc.XRDEPTHSENSINGFORMAT_R16U
+        };
+        const depthFormatPref = DFMT[urlParams.get('dfmt')] || pc.XRDEPTHSENSINGFORMAT_F32;
+        const depthUsagePref = urlParams.get('dusage') === 'cpu'
+            ? pc.XRDEPTHSENSINGUSAGE_CPU : pc.XRDEPTHSENSINGUSAGE_GPU;
         const dscaleParam = parseFloat(urlParams.get('dscale'));
         const depthScale = isFinite(dscaleParam) ? dscaleParam : 65535.0;
         /// XrManager.start() hard-rejects a type whose async isSessionSupported()
@@ -322,9 +332,13 @@
                         'uniform mat4 matrix_depth_uv;',
                         'uniform float depth_to_meters;',
                         'uniform float depth_scale;',
+                        'uniform float depth_mode;',
                         'void main(void) {',
                         '    vec2 texCoord = (matrix_depth_uv * vec4(vUv0.xy, 0.0, 1.0)).xy;',
-                        '    float raw = texture2D(texture_depthSensingMap, texCoord).r;',
+                        '    vec4 texel = texture2D(texture_depthSensingMap, texCoord);',
+                        '    float raw = (depth_mode > 0.5)',
+                        '        ? dot(texel.ra, vec2(255.0, 65280.0))',
+                        '        : texel.r;',
                         /// green means the sample really is zero, which separates
                         /// "no data reaching the shader" from "wrong scale factor"
                         '    if (raw <= 0.0) {',
@@ -353,6 +367,8 @@
             /// tunable from the URL (?dscale=) so the scale can be swept without
             /// a redeploy — the raw unit is not documented for PIXELFORMAT_DEPTH
             mat.setParameter('depth_scale', depthScale);
+            mat.setParameter('depth_mode',
+                views.depthFormat === pc.XRDEPTHSENSINGFORMAT_L8A8 ? 1 : 0);
 
             if (!depthPreview.__logged) {
                 depthPreview.__logged = true;
@@ -409,8 +425,8 @@
                 /// the floor is passthrough now, so drop our own ground plane
                 floor.enabled = false;
                 opts.depthSensing = {
-                    usagePreference: pc.XRDEPTHSENSINGUSAGE_GPU,
-                    dataFormatPreference: pc.XRDEPTHSENSINGFORMAT_L8A8
+                    usagePreference: depthUsagePref,
+                    dataFormatPreference: depthFormatPref
                 };
             }
 
