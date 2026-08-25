@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 39;
+        const BUILD = 40;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -68,6 +68,8 @@
         /// VR is the default: a plain launch must always come up. AR/depth is
         /// opt-in via ?mode=ar so an experiment can never break the base demo.
         const arMode = urlParams.get('mode') === 'ar';
+        /// panel, controller rays and cubes are diagnostics - off unless ?debug=1
+        const showDebug = urlParams.get('debug') === '1';
         /// PIXELFORMAT_DEPTH (unsigned-short) samples as zero through a normal
         /// sampler2D, so allow the format/usage to be swept from the URL.
         const DFMT = {
@@ -178,6 +180,7 @@
             });
             cube.setPosition(Math.sin(a) * 3.5, 1.4, Math.cos(a) * 3.5);
             cube.setLocalScale(0.5, 0.5, 0.5);
+            cube.enabled = showDebug;
             app.root.addChild(cube);
             cubes.push({ entity: cube, phase: a });
         }
@@ -196,6 +199,7 @@
         /// ---- controller / hand input: draw a ray from each input source ----
         const rays = new Map();
         function addInputSource(inputSource) {
+            if (!showDebug) return;
             const e = new pc.Entity('ray');
             e.addComponent('render', { type: 'box', material: material(0.9, 0.9, 1, true) });
             e.setLocalScale(0.012, 0.012, 1.2);
@@ -251,6 +255,7 @@
         panel.setLocalEulerAngles(90, 0, 0);
         panel.setLocalPosition(0, -0.30, -0.9);
         panel.setLocalScale(0.72, 1, 0.36);
+        panel.enabled = showDebug;
         camera.addChild(panel);
 
         function drawPanel(lines) {
