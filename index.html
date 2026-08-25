@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 44;
+        const BUILD = 45;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -391,10 +391,16 @@
             depthFrameLoopStarted = true;
             const tick = function (time, frame) {
                 lastXrFrame = frame;
+                lastFrameTime = time;
+                /// refresh the depth handle every frame so the composite samples
+                /// the current frame, not whatever the last readback captured
+                if (eyeOn) {
+                    try { refreshDepthInfo(frame); } catch (e) { /* transient */ }
+                }
                 /// the depth texture is opaque: it is only a legal GL object inside
                 /// the frame callback that produced it. Doing the pass later (from
                 /// app.on('update')) fails the draw with GL_INVALID_OPERATION.
-                if (time - lastDepthBlit > 200) {
+                if ((cloudOn || readbackOn) && time - lastDepthBlit > 200) {
                     lastDepthBlit = time;
                     try {
                         blitDepth(frame, time);
@@ -951,15 +957,36 @@
             rig.rotate(0, 4 * dt, 0);
         });
 
+        let lastFrameTime = 0;
+        let readbackOn = false;
+
+        /// cheap per-frame handle refresh - no GPU stall
+        function refreshDepthInfo(frame) {
+            const views = app.xr.views;
+            if (!views.availableDepth) return;
+            const space = app.xr._referenceSpace;
+            if (!space) return;
+            const pose = frame.getViewerPose(space);
+            if (!pose || !pose.views.length) return;
+            const gl = app.graphicsDevice.gl;
+            if (!xrBinding) xrBinding = new XRWebGLBinding(app.xr.session, gl);
+            const di = xrBinding.getDepthInformation(pose.views[0]);
+            if (di && di.texture) lastDi = di;
+        }
+
         /// ---- per-eye screen-space depth composite ----
         let eyeProg = null;
-        let eyeOn = false;
+        let eyeOn = true;
         let eyeAlpha = 0.6;
         /// FIXED range - auto-contrast per frame makes a near object rescale the
         /// whole scene, which reads as the background shifting when a hand appears
         let eyeLo = 45000;
         let eyeHi = 65535;
         let lastDi = null;
+        let sweepSpeed = 0.25;
+        let sweepFixed = 0.5;
+        let sweepBands = 24.0;
+        let sweepSharp = 900.0;
 
         function initEyeProg() {
             const gl = app.graphicsDevice.gl;
@@ -982,13 +1009,26 @@
                 'uniform float uLo;\n' +
                 'uniform float uHi;\n' +
                 'uniform float uAlpha;\n' +
+                'uniform float uSlice;\n' +
+                'uniform float uBands;\n' +
+                'uniform float uSharp;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
                 'void main() {\n' +
                 '    float raw = texture(uDepth, vec3(vUv, uLayer)).r * 65535.0;\n' +
                 '    if (raw <= 0.0) { discard; }\n' +
                 '    float n = clamp((raw - uLo) / max(1.0, uHi - uLo), 0.0, 1.0);\n' +
-                '    fragColor = vec4(1.0 - n, n * 0.7, n, uAlpha);\n' +
+                /// topographic iso-depth contours
+                '    float ring = abs(fract(n * uBands) - 0.5) * 2.0;\n' +
+                '    float contour = smoothstep(0.88, 1.0, ring);\n' +
+                /// a plane sweeping through the depth range
+                '    float dist = n - uSlice;\n' +
+                '    float glow = exp(-dist * dist * uSharp);\n' +
+                '    vec3 base = vec3(1.0 - n, n * 0.55, n);\n' +
+                '    vec3 col = base * 0.55 + vec3(0.25, 0.55, 0.75) * contour;\n' +
+                '    col += vec3(0.45, 1.0, 0.95) * glow;\n' +
+                '    float a = uAlpha * (0.30 + 0.75 * glow + 0.35 * contour);\n' +
+                '    fragColor = vec4(col, clamp(a, 0.0, 1.0));\n' +
                 '}\n');
             if (!vs || !fs) return null;
 
@@ -1006,7 +1046,10 @@
                 uLayer: gl.getUniformLocation(prog, 'uLayer'),
                 uLo: gl.getUniformLocation(prog, 'uLo'),
                 uHi: gl.getUniformLocation(prog, 'uHi'),
-                uAlpha: gl.getUniformLocation(prog, 'uAlpha')
+                uAlpha: gl.getUniformLocation(prog, 'uAlpha'),
+                uSlice: gl.getUniformLocation(prog, 'uSlice'),
+                uBands: gl.getUniformLocation(prog, 'uBands'),
+                uSharp: gl.getUniformLocation(prog, 'uSharp')
             };
             console.log('[pcvr] per-eye composite program ready');
             return eyeProg;
@@ -1052,6 +1095,13 @@
             gl.uniform1f(g.uLo, eyeLo);
             gl.uniform1f(g.uHi, eyeHi);
             gl.uniform1f(g.uAlpha, eyeAlpha);
+            /// sweep the slice through the depth range over time
+            const sweep = sweepSpeed > 0
+                ? ((lastFrameTime * 0.001 * sweepSpeed) % 1.0)
+                : sweepFixed;
+            gl.uniform1f(g.uSlice, sweep);
+            gl.uniform1f(g.uBands, sweepBands);
+            gl.uniform1f(g.uSharp, sweepSharp);
 
             for (let i = 0; i < views.length; i++) {
                 const vp = views[i].viewport;
@@ -1265,6 +1315,26 @@
                     cloudOn = false;
                 }
                 return { perEye: eyeOn };
+            },
+            sweep: function (speed) {
+                if (isFinite(speed)) sweepSpeed = speed;
+                return { speed: sweepSpeed };
+            },
+            slice: function (v) {
+                if (isFinite(v)) { sweepFixed = v; sweepSpeed = 0; }
+                return { slice: sweepFixed, speed: sweepSpeed };
+            },
+            bands: function (n) {
+                if (isFinite(n)) sweepBands = n;
+                return { bands: sweepBands };
+            },
+            sharp: function (v) {
+                if (isFinite(v)) sweepSharp = v;
+                return { sharp: sweepSharp };
+            },
+            readback: function (v) {
+                readbackOn = !!v;
+                return { readback: readbackOn };
             },
             range: function (lo, hi) {
                 if (isFinite(lo)) eyeLo = lo;
