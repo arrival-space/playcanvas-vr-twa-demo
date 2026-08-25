@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 26;
+        const BUILD = 27;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -392,30 +392,36 @@
             const gl = app.graphicsDevice.gl;
             if (!gl || glDepth) return glDepth;
 
-            /// standalone program, so it needs its own precision qualifiers - the
-            /// no-precision rule only applies to engine-injected chunks
+            /// Mirrors Meta's proj-multiview-occlusion sample: a FLOAT
+            /// sampler2DArray read with texture() and normalised UVs. The integer
+            /// sampler + texelFetch combination is what throws INVALID_OPERATION.
             const vs = compileShader(gl, gl.VERTEX_SHADER,
                 '#version 300 es\n' +
                 'in vec2 aPos;\n' +
-                'void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n');
+                'out vec2 vUv;\n' +
+                'void main() {\n' +
+                '    vUv = aPos * 0.5 + 0.5;\n' +
+                '    gl_Position = vec4(aPos, 0.0, 1.0);\n' +
+                '}\n');
             const fs = compileShader(gl, gl.FRAGMENT_SHADER,
                 '#version 300 es\n' +
                 'precision highp float;\n' +
-                (useUintSampler
-                    ? 'precision highp usampler2DArray;\nuniform usampler2DArray uDepth;\n'
-                    : 'precision highp sampler2DArray;\nuniform sampler2DArray uDepth;\n') +
-                'uniform int uLayer;\n' +
+                'precision highp sampler2DArray;\n' +
+                'uniform sampler2DArray uDepth;\n' +
+                'uniform float uLayer;\n' +
                 'uniform float uToMeters;\n' +
+                'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
                 'void main() {\n' +
-                '    ivec3 c = ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer);\n' +
-                (useUintSampler
-                    ? '    float rawf = float(texelFetch(uDepth, c, 0).r);\n'
-                    : '    float rawf = texelFetch(uDepth, c, 0).r * 65535.0;\n') +
-                '    if (rawf <= 0.0) { fragColor = vec4(0.0, 0.7, 0.0, 1.0); return; }\n' +
-                '    float meters = rawf * uToMeters;\n' +
-                '    float n = clamp(meters / 4.0, 0.0, 1.0);\n' +
-                '    fragColor = vec4(1.0 - n, n * 0.7, n, 1.0);\n' +
+                '    float raw = texture(uDepth, vec3(vUv, uLayer)).r;\n' +
+                '    float meters = raw * 1000.0 * uToMeters;\n' +
+                /// pack metres into R+G as a 16-bit fixed point over 0..16m so the
+                /// readback gives real numbers, not just a picture
+                '    float n = clamp(meters / 16.0, 0.0, 1.0);\n' +
+                '    float q = floor(n * 65535.0 + 0.5);\n' +
+                '    float hi = floor(q / 256.0);\n' +
+                '    float lo = q - hi * 256.0;\n' +
+                '    fragColor = vec4(hi / 255.0, lo / 255.0, 0.0, 1.0);\n' +
                 '}\n');
             if (!vs || !fs) return null;
 
@@ -438,8 +444,8 @@
             gl.bindTexture(gl.TEXTURE_2D, tex);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, DEPTH_W, DEPTH_H, 0,
                 gl.RGBA, gl.UNSIGNED_BYTE, null);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
             const fbo = gl.createFramebuffer();
             gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
@@ -447,7 +453,7 @@
             const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
             if (!complete) {
-                console.log('[pcvr] depth fbo incomplete');
+                console.log('[pcvr] own fbo incomplete');
                 return null;
             }
 
@@ -457,13 +463,8 @@
                 uLayer: gl.getUniformLocation(prog, 'uLayer'),
                 uToMeters: gl.getUniformLocation(prog, 'uToMeters')
             };
-            console.log('[pcvr] raw depth GL pipeline ready');
+            console.log('[pcvr] depth sampler pipeline ready (float sampler2DArray)');
             return glDepth;
-        }
-
-        function bindDepthPreview() {
-            if (!app.xr.views.availableDepth) return;
-            startDepthFrameLoop();
         }
 
         function ensureDepthQuad() {
@@ -569,13 +570,14 @@
             const pose = frame.getViewerPose(space);
             if (!pose || !pose.views.length) return;
 
-            /// if the UA ever grants cpu-optimized, getDepth() is the easy road
             if (!views.depthGpuOptimized) {
                 if (views.list.length) cpuDepthGrid(views.list[0]);
                 return;
             }
 
             const gl = app.graphicsDevice.gl;
+            const g = initGlDepth();
+            if (!g) return;
             if (!xrBinding) xrBinding = new XRWebGLBinding(app.xr.session, gl);
 
             let di = null;
@@ -590,67 +592,74 @@
             }
             if (!di || !di.texture) return;
 
-            const W = di.width;
-            const H = di.height;
-            if (!readFbo) readFbo = gl.createFramebuffer();
-
             const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
-            gl.bindFramebuffer(gl.FRAMEBUFFER, readFbo);
+            const prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
+            const prevVp = gl.getParameter(gl.VIEWPORT);
+            const prevArr = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+            const prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+            const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
+            const prevCull = gl.isEnabled(gl.CULL_FACE);
+            const prevDepth = gl.isEnabled(gl.DEPTH_TEST);
+            const prevBlend = gl.isEnabled(gl.BLEND);
+            const prevActive = gl.getParameter(gl.ACTIVE_TEXTURE);
 
-            /// attach the requested array layer directly as a colour attachment -
-            /// no sampling, so no sampler-type mismatch is possible
-            gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
-                di.texture, 0, di.imageIndex || 0);
+            gl.bindVertexArray(null);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, g.fbo);
+            gl.viewport(0, 0, DEPTH_W, DEPTH_H);
+            gl.useProgram(g.prog);
+            gl.disable(gl.DEPTH_TEST);
+            gl.disable(gl.BLEND);
+            gl.disable(gl.SCISSOR_TEST);
+            gl.disable(gl.CULL_FACE);
+            gl.colorMask(true, true, true, true);
 
-            const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-            if (status !== gl.FRAMEBUFFER_COMPLETE) {
-                if (!readLogged) {
-                    readLogged = true;
-                    console.log('[pcvr] depth fbo status=0x' + (status >>> 0).toString(16) +
-                        ' (not complete) - cannot read back this attachment');
-                }
-                gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
-                return;
-            }
+            const UNIT = 15;
+            gl.activeTexture(gl.TEXTURE0 + UNIT);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.bindTexture(gl.TEXTURE_2D_ARRAY, di.texture);
+            /// no texParameteri: opaque texture, and the UA already gives it
+            /// texStorage-like completeness
+            gl.uniform1i(g.uDepth, UNIT);
+            gl.uniform1f(g.uLayer, di.imageIndex || 0);
+            gl.uniform1f(g.uToMeters, di.rawValueToMeters || 1);
 
-            /// ask GL what this attachment can actually be read as
-            const fmt = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT);
-            const type = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE);
-            const comps = componentsFor(gl, fmt);
-
-            if (!depthBuf || depthBuf.length !== W * H * comps) {
-                depthBuf = allocFor(gl, type, W * H * comps);
-            }
+            gl.bindBuffer(gl.ARRAY_BUFFER, g.vbo);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
             while (gl.getError() !== gl.NO_ERROR) { /* drain */ }
-            gl.readPixels(0, 0, W, H, fmt, type, depthBuf);
-            const readErr = gl.getError();
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+            const drawErr = gl.getError();
+
+            if (!depthPixels) depthPixels = new Uint8Array(DEPTH_W * DEPTH_H * 4);
+            gl.readPixels(0, 0, DEPTH_W, DEPTH_H, gl.RGBA, gl.UNSIGNED_BYTE, depthPixels);
+
             gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+            gl.useProgram(prevProg);
+            gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+            gl.bindBuffer(gl.ARRAY_BUFFER, prevArr);
+            gl.bindVertexArray(prevVao);
+            gl.activeTexture(prevActive);
+            if (prevScissor) gl.enable(gl.SCISSOR_TEST);
+            if (prevCull) gl.enable(gl.CULL_FACE);
+            if (prevDepth) gl.enable(gl.DEPTH_TEST);
+            if (prevBlend) gl.enable(gl.BLEND);
 
-            if (readErr !== 0) {
-                if (!readLogged) {
-                    readLogged = true;
-                    console.log('[pcvr] readPixels err=' + readErr +
-                        ' fmt=0x' + (fmt >>> 0).toString(16) +
-                        ' type=0x' + (type >>> 0).toString(16));
-                }
-                return;
-            }
-
-            /// raw -> metres
-            const toM = di.rawValueToMeters || 1;
+            /// decode the packed 16-bit metres and paint the quad
             ensureDepthQuad();
+            const src = depthPixels;
             const px = depthImage.data;
             let valid = 0, minD = Infinity, maxD = -Infinity;
+            const rowBytes = DEPTH_W * 4;
 
             for (let y = 0; y < DEPTH_H; y++) {
-                const sy = Math.min(H - 1, Math.floor(y * H / DEPTH_H));
+                const s0 = (DEPTH_H - 1 - y) * rowBytes;
                 for (let x = 0; x < DEPTH_W; x++) {
-                    const sx = Math.min(W - 1, Math.floor(x * W / DEPTH_W));
-                    const raw = depthBuf[(sy * W + sx) * comps];
-                    const d = raw * toM;
+                    const si = s0 + x * 4;
+                    const q = src[si] * 256 + src[si + 1];
+                    const d = (q / 65535) * 16;
                     const i = (y * DEPTH_W + x) * 4;
-                    if (!raw) {
+                    if (q === 0) {
                         px[i] = 0; px[i + 1] = 180; px[i + 2] = 0;
                     } else {
                         valid++;
@@ -667,16 +676,14 @@
             depthCtx.putImageData(depthImage, 0, 0);
             depthTexture.upload();
 
-            lastDepthCentre = depthBuf[((H >> 1) * W + (W >> 1)) * comps] * toM;
+            const ci = ((DEPTH_H >> 1) * DEPTH_W + (DEPTH_W >> 1)) * 4;
+            lastDepthCentre = ((src[ci] * 256 + src[ci + 1]) / 65535) * 16;
 
             if (!readLogged) {
                 readLogged = true;
-                console.log('[pcvr] DEPTH READBACK OK | ' + W + 'x' + H +
-                    ' fmt=0x' + (fmt >>> 0).toString(16) +
-                    ' type=0x' + (type >>> 0).toString(16) +
-                    ' comps=' + comps +
-                    ' toMeters=' + toM +
-                    ' valid=' + valid +
+                console.log('[pcvr] DEPTH SAMPLE | drawErr=' + drawErr +
+                    ' toMeters=' + di.rawValueToMeters +
+                    ' valid=' + valid + '/' + (DEPTH_W * DEPTH_H) +
                     ' min=' + (isFinite(minD) ? minD.toFixed(3) : 'n/a') +
                     ' max=' + (isFinite(maxD) ? maxD.toFixed(3) : 'n/a') +
                     ' centre=' + lastDepthCentre.toFixed(3) + 'm');
