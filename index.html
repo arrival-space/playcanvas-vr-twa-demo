@@ -56,6 +56,11 @@
         const scaleParam = parseFloat(urlParams.get('scale'));
         const requestedScale = (isFinite(scaleParam) && scaleParam > 0) ? scaleParam : 1.0;
 
+        /// ?mode=ar starts an immersive-ar session with depth sensing. Depth and
+        /// anchors are MR features, so they need passthrough (immersive-ar) plus
+        /// the USE_SCENE android permission that the packaged APK declares.
+        const arMode = urlParams.get('mode') === 'ar';
+
         app.scene.ambientLight = new pc.Color(0.12, 0.14, 0.2);
 
         /// camera lives under a rig so we can move the player without fighting
@@ -238,12 +243,51 @@
                 lines.push('refresh   : ' + (s.frameRate ? num(s.frameRate, 0) + ' Hz' : 'n/a'));
                 lines.push('rates     : ' + (s.supportedFrameRates ?
                     Array.from(s.supportedFrameRates).join(' ') : 'n/a'));
+
+                if (arMode) {
+                    const v = app.xr.views;
+                    lines.push('depth sup : ' + v.supportedDepth + '  avail: ' + v.availableDepth);
+                    lines.push('depth fmt : ' + v.depthFormat + ' / ' + v.depthUsage);
+                    bindDepthPreview();
+                }
             } else {
                 lines.push('(no xr session yet)');
             }
 
             lines.push('fps       : ' + num(fps, 1));
             drawPanel(lines);
+        }
+
+        /// Shows the raw depth texture next to the readout. LA8 packed depth as an
+        /// emissive map is not metrically meaningful, but it moves with the room,
+        /// which is the proof we want before investing in an unpack shader.
+        let depthPreview = null;
+        function bindDepthPreview() {
+            const views = app.xr.views;
+            if (!views.availableDepth || !views.list.length) return;
+
+            const tex = views.list[0].textureDepth;
+            if (!tex) return;
+
+            if (!depthPreview) {
+                const m = new pc.StandardMaterial();
+                m.diffuse = new pc.Color(0, 0, 0);
+                m.emissive = new pc.Color(1, 1, 1);
+                m.useLighting = false;
+                depthPreview = new pc.Entity('depth-preview');
+                depthPreview.addComponent('render', { type: 'plane', material: m, castShadows: false });
+                depthPreview.setLocalEulerAngles(90, 0, 0);
+                depthPreview.setLocalPosition(0.56, -0.28, -1.1);
+                depthPreview.setLocalScale(0.34, 1, 0.34);
+                camera.addChild(depthPreview);
+            }
+
+            const mat = depthPreview.render.material;
+            if (mat.emissiveMap !== tex) {
+                mat.emissiveMap = tex;
+                mat.update();
+                console.log('[pcvr] depth texture bound ' + tex.width + 'x' + tex.height);
+            }
         }
 
         let fps = 0;
@@ -272,8 +316,10 @@
         function startXR(reason) {
             if (sessionRequested || app.xr.active) return;
             sessionRequested = true;
-            console.log('[pcvr] requesting session (' + reason + ') scale=' + requestedScale);
-            app.xr.start(camera.camera, pc.XRTYPE_VR, pc.XRSPACE_LOCALFLOOR, {
+            console.log('[pcvr] requesting session (' + reason + ') scale=' + requestedScale +
+                ' mode=' + (arMode ? 'ar' : 'vr'));
+
+            const opts = {
                 framebufferScaleFactor: requestedScale,
                 callback: function (err) {
                     if (err) {
@@ -286,7 +332,19 @@
                         console.log('[pcvr] session started');
                     }
                 }
-            });
+            };
+
+            if (arMode) {
+                /// the floor is passthrough now, so drop our own ground plane
+                floor.enabled = false;
+                opts.depthSensing = {
+                    usagePreference: pc.XRDEPTHSENSINGUSAGE_GPU,
+                    dataFormatPreference: pc.XRDEPTHSENSINGFORMAT_L8A8
+                };
+            }
+
+            app.xr.start(camera.camera, arMode ? pc.XRTYPE_AR : pc.XRTYPE_VR,
+                pc.XRSPACE_LOCALFLOOR, opts);
         }
 
         app.xr.on('start', function () { hud.classList.add('hidden'); });
