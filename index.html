@@ -54,7 +54,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 8;
+        const BUILD = 9;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -386,34 +386,48 @@
             /// Availability resolves asynchronously (navigator.xr.isSessionSupported),
             /// so on a headset it is still false at load time. Auto-start has to hang
             /// off this event as well, not just the synchronous read below.
-            app.xr.on('available:' + sessionType, function (available) {
-                console.log('[pcvr] available:' + sessionType + ' -> ' + available);
-                btn.disabled = !available;
-                setStatus(available ? sessionType + ' available' : 'no ' + sessionType + ' device');
-                if (available) startXR('availability event');
-            });
+            /// Availability for each session type resolves independently and can
+            /// arrive in any order, so re-evaluate the choice on every event
+            /// instead of committing to one type up front. AR preferred, VR is
+            /// the floor, and a timeout guarantees we never sit in the OS splash.
+            const tryStart = function (reason) {
+                if (sessionRequested || app.xr.active) return;
 
-            /// If the headset has no immersive-ar, fall back to vr rather than
-            /// leaving the app sitting in the OS splash with nothing rendering.
-            if (arMode) {
-                app.xr.on('available:' + pc.XRTYPE_AR, function (available) {
-                    if (available || sessionRequested || app.xr.active) return;
-                    console.log('[pcvr] immersive-ar unavailable, falling back to vr');
+                if (arMode && app.xr.isAvailable(pc.XRTYPE_AR)) {
+                    sessionType = pc.XRTYPE_AR;
+                    startXR(reason + ':ar');
+                    return;
+                }
+                if (app.xr.isAvailable(pc.XRTYPE_VR)) {
                     sessionType = pc.XRTYPE_VR;
                     floor.enabled = true;
-                    if (app.xr.isAvailable(pc.XRTYPE_VR)) startXR('ar fallback');
-                });
-            }
+                    startXR(reason + ':vr');
+                }
+            };
 
-            const available = app.xr.isAvailable(sessionType);
-            btn.disabled = !available;
-            setStatus(available ? sessionType + ' available' : 'checking for a headset…');
+            [pc.XRTYPE_AR, pc.XRTYPE_VR].forEach(function (t) {
+                app.xr.on('available:' + t, function (available) {
+                    console.log('[pcvr] available:' + t + ' -> ' + available);
+                    btn.disabled = !(app.xr.isAvailable(pc.XRTYPE_VR) ||
+                        app.xr.isAvailable(pc.XRTYPE_AR));
+                    tryStart('event');
+                });
+            });
+
+            setStatus('checking for a headset…');
 
             /// Meta grants the activation to an immersive-mode PWA: "clicking the PWA
             /// app icon is considered user action to create a WebXR session". So the
-            /// launch itself is the gesture — request as soon as we know a device is
-            /// there, and keep the button as the fallback when it is refused.
-            if (available) startXR('load');
+            /// launch itself is the gesture — request as soon as a device is known.
+            tryStart('load');
+
+            setTimeout(function () {
+                if (sessionRequested || app.xr.active) return;
+                console.log('[pcvr] availability timeout, forcing vr');
+                sessionType = pc.XRTYPE_VR;
+                floor.enabled = true;
+                startXR('timeout');
+            }, 2500);
         }
 
         /// flat fallback: slow orbit so a desktop / 2D launch is not a dead screen
