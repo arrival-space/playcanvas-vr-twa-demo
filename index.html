@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 29;
+        const BUILD = 30;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -308,8 +308,9 @@
                     const v = app.xr.views;
                     lines.push('depth sup : ' + v.supportedDepth + '  avail: ' + v.availableDepth);
                     lines.push('depth fmt : ' + v.depthFormat + ' / ' + v.depthUsage);
-                    lines.push('centre    : ' + (lastDepthCentre
-                        ? lastDepthCentre.toFixed(2) + ' m' : 'no reading'));
+                    lines.push('raw ctr   : ' + lastDepthRaw + '   scale ' + depthScale);
+                    lines.push('dist      : ' + (lastDepthCentre
+                        ? lastDepthCentre.toFixed(3) + ' m' : 'no reading'));
                     bindDepthPreview();
                 }
             } else {
@@ -349,6 +350,7 @@
         let lastDepthBlit = 0;
         let lastGridSample = null;
         let lastDepthCentre = 0;
+        let lastDepthRaw = 0;
         const allowGpuBlit = true;
 
         function startDepthFrameLoop() {
@@ -682,7 +684,8 @@
             depthTexture.upload();
 
             const ci = ((DEPTH_H >> 1) * DEPTH_W + (DEPTH_W >> 1)) * 4;
-            lastDepthCentre = (src[ci] * 256 + src[ci + 1]) * depthScale;
+            lastDepthRaw = src[ci] * 256 + src[ci + 1];
+            lastDepthCentre = lastDepthRaw * depthScale;
 
             if (!readLogged) {
                 readLogged = true;
