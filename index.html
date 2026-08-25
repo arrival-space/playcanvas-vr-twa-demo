@@ -56,7 +56,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 35;
+        const BUILD = 36;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -310,6 +310,8 @@
                     lines.push('depth fmt : ' + v.depthFormat + ' / ' + v.depthUsage);
                     lines.push('raw ctr   : ' + lastDepthRaw);
                     lines.push('raw range : ' + lastRawLo + ' .. ' + lastRawHi);
+                    lines.push('overlay   : d=' + depthDist + ' s=' + depthSize +
+                        ' op=' + depthOpacity);
                     lines.push('dist      : ' + (lastDepthCentre
                         ? lastDepthCentre.toFixed(3) + ' m' : 'no reading'));
                     bindDepthPreview();
@@ -358,6 +360,10 @@
         const depthOverlay = new URLSearchParams(location.search).get('doverlay') !== '0';
         const dopParam = parseFloat(new URLSearchParams(location.search).get('dop'));
         const depthOpacity = isFinite(dopParam) ? dopParam : 0.75;
+        const ddistParam = parseFloat(new URLSearchParams(location.search).get('ddist'));
+        const depthDist = isFinite(ddistParam) ? ddistParam : 2.5;
+        const dsizeParam = parseFloat(new URLSearchParams(location.search).get('dsize'));
+        const depthSize = isFinite(dsizeParam) ? dsizeParam : 0.6;
         const allowGpuBlit = true;
 
         function startDepthFrameLoop() {
@@ -512,11 +518,12 @@
             depthPreview.setLocalEulerAngles(90, 0, 0);
 
             if (depthOverlay) {
-                /// size the quad to fill the frustum at a fixed distance so it
-                /// reads as a screen-space overlay rather than an object
-                const dist = 1.2;
+                /// pushed further out and sized below the full frustum so it sits
+                /// in the scene rather than pasted on the lens. ?ddist / ?dsize
+                /// tune it live without a redeploy.
+                const dist = depthDist;
                 const fovRad = (camera.camera.fov || 60) * Math.PI / 180;
-                const h = 2 * dist * Math.tan(fovRad / 2) * 1.35;
+                const h = 2 * dist * Math.tan(fovRad / 2) * depthSize;
                 const w = h * 1.6;
                 m.blendType = pc.BLEND_NORMAL;
                 m.opacity = depthOpacity;
