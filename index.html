@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 72;
+        const BUILD = 73;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1715,7 +1715,7 @@
         let primeProg = null;
         let primeOn = false;
         let primeBias = 0.02;      // metres; push the real world slightly back
-        let primeSmooth = 4;       // 0 nearest, 1 bilinear, 2 tent, 3 edge-snap, 4 fxaa
+        let primeSmooth = 6;       // 0 nearest 1 bilinear 2 tent 3 edge-snap 4 fxaa 6 MLAA
         let primeSubpix = 0.75;    // fxaa sub-pixel aliasing strength
         let primeSoften = 0.75;    // texels; feather applied AFTER edge reconstruction
         let primeEdge = 0.01;      // raw units; below this there is no edge to snap to
@@ -1906,8 +1906,95 @@
                 '    if (horz) fuv.y += finalOff * stepLen; else fuv.x += finalOff * stepLen;\n' +
                 '    return tentAt(fuv, uSoften, m);\n' +
                 '}\n' +
+                'float texI(float i, float j) {\n' +
+                '    return texture(uDepth, vec3((vec2(i, j) + 0.5) / uTexSize, uLayer)).r;\n' +
+                '}\n' +
+                'float biRaw(vec2 uv) {\n' +
+                '    vec3 g = gather(uv);\n' +
+                '    return g.y <= 0.0 ? 0.0 : g.x;\n' +
+                '}\n' +
+                'int clsAt(float i, float j, float level) {\n' +
+                '    return texI(i, j) > level ? 1 : 0;\n' +
+                '}\n' +
+                'float edgeAt(bool horz, float c, float guess, float level) {\n' +
+                '    for (int d = 0; d <= 2; d++) {\n' +
+                '        float g = guess - float(d);\n' +
+                '        int a1 = horz ? clsAt(c, g, level) : clsAt(g, c, level);\n' +
+                '        int b1 = horz ? clsAt(c, g + 1.0, level) : clsAt(g + 1.0, c, level);\n' +
+                '        if (a1 != b1) return g + 1.0;\n' +
+                '        if (d > 0) {\n' +
+                '            float g2 = guess + float(d);\n' +
+                '            int a2 = horz ? clsAt(c, g2, level) : clsAt(g2, c, level);\n' +
+                '            int b2 = horz ? clsAt(c, g2 + 1.0, level) : clsAt(g2 + 1.0, c, level);\n' +
+                '            if (a2 != b2) return g2 + 1.0;\n' +
+                '        }\n' +
+                '    }\n' +
+                '    return -9999.0;\n' +
+                '}\n' +
+                'vec4 mlaaAxis(bool horz, vec2 t, float level) {\n' +
+                '    float a = horz ? t.x : t.y;\n' +
+                '    float ia = floor(a);\n' +
+                '    float ib = floor(horz ? t.y : t.x);\n' +
+                '    float e0 = edgeAt(horz, ia, ib, level);\n' +
+                '    if (e0 < -9000.0) return vec4(0.0, 0.0, 0.0, -1.0);\n' +
+                '    float L = 0.0;\n' +
+                '    for (int k = 0; k < 8; k++) {\n' +
+                '        if (edgeAt(horz, ia - L - 1.0, ib, level) != e0) break;\n' +
+                '        L += 1.0;\n' +
+                '    }\n' +
+                '    float R = 0.0;\n' +
+                '    for (int k = 0; k < 8; k++) {\n' +
+                '        if (edgeAt(horz, ia + R + 1.0, ib, level) != e0) break;\n' +
+                '        R += 1.0;\n' +
+                '    }\n' +
+                '    float N = L + R + 1.0;\n' +
+                '    float aStart = ia - L;\n' +
+                '    float eL = edgeAt(horz, aStart - 1.0, ib, level);\n' +
+                '    float eR = edgeAt(horz, aStart + N, ib, level);\n' +
+                '    float pos = 0.0;\n' +
+                '    if (eL == e0 - 1.0 && eR == e0 + 1.0) {\n' +
+                '        pos = e0 - 0.5 + (a - aStart) / N;\n' +
+                '    } else if (eL == e0 + 1.0 && eR == e0 - 1.0) {\n' +
+                '        pos = e0 + 0.5 - (a - aStart) / N;\n' +
+                '    } else if (eL > -9000.0 && eL == e0 - 1.0) {\n' +
+                '        pos = e0 - 0.5 + 0.5 * (a - aStart) / N;\n' +
+                '    } else if (eR > -9000.0 && eR == e0 + 1.0) {\n' +
+                '        pos = e0 + 0.5 * (a - aStart) / N;\n' +
+                '    } else {\n' +
+                '        return vec4(0.0, 0.0, 0.0, -1.0);\n' +
+                '    }\n' +
+                '    float nearS = horz ? texI(ia, e0 - 1.0) : texI(e0 - 1.0, ia);\n' +
+                '    float farS = horz ? texI(ia, e0) : texI(e0, ia);\n' +
+                '    return vec4(pos, nearS, farS, N);\n' +
+                '}\n' +
+                'float mlaaRaw(vec2 uv) {\n' +
+                '    vec2 t = uv * uTexSize;\n' +
+                '    float ix = floor(t.x);\n' +
+                '    float iy = floor(t.y);\n' +
+                '    float mn = 1.0;\n' +
+                '    float mx = 0.0;\n' +
+                '    for (int j = -1; j <= 1; j++) {\n' +
+                '        for (int i = -1; i <= 1; i++) {\n' +
+                '            float r = texI(ix + float(i), iy + float(j));\n' +
+                '            if (r > 0.0) { mn = min(mn, r); mx = max(mx, r); }\n' +
+                '        }\n' +
+                '    }\n' +
+                '    if (mx - mn < uEdgeT) return biRaw(uv);\n' +
+                '    float level = 0.5 * (mn + mx);\n' +
+                '    int c = clsAt(ix, iy, level);\n' +
+                '    bool flipV = (clsAt(ix, iy - 1.0, level) != c) || (clsAt(ix, iy + 1.0, level) != c);\n' +
+                '    bool flipH = (clsAt(ix - 1.0, iy, level) != c) || (clsAt(ix + 1.0, iy, level) != c);\n' +
+                '    vec4 r;\n' +
+                '    float b;\n' +
+                '    if (flipV) { r = mlaaAxis(true, t, level); b = t.y; }\n' +
+                '    else if (flipH) { r = mlaaAxis(false, t, level); b = t.x; }\n' +
+                '    else return biRaw(uv);\n' +
+                '    if (r.w < 2.0) return biRaw(uv);\n' +
+                '    return b < r.x ? r.y : r.z;\n' +
+                '}\n' +
                 'float sampleRaw(vec2 uv) {\n' +
                 '    if (uSmooth < 0.5) return texture(uDepth, vec3(uv, uLayer)).r;\n' +
+                '    if (uSmooth > 5.5) return mlaaRaw(uv);\n' +
                 '    if (uSmooth > 3.5) return fxaaDepth(uv);\n' +
                 '    if (uSmooth > 1.5 && uSmooth < 2.5) {\n' +
                 /// wider tent, for comparison
@@ -2502,7 +2589,8 @@
                     smooth: primeSmooth,
                     meaning: ['nearest (blocky)', 'bilinear (smooth, has a skirt)',
                               'bilinear + 3x3 tent', 'edge-snap (FXAA-flavoured)',
-                              'FXAA (edge search + resample + feather)'][primeSmooth] || '?',
+                              'FXAA (edge search + resample + feather)', '?',
+                              'MLAA (run-length edge reconstruction)'][primeSmooth] || '?',
                     soften: primeSoften,
                     edgeThreshold: primeEdge,
                     subpix: primeSubpix
