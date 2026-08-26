@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 75;
+        const BUILD = 76;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1738,6 +1738,9 @@
         let primeSubpix = 0.75;    // fxaa sub-pixel aliasing strength
         let primeSoften = 0.75;    // texels; feather applied AFTER edge reconstruction
         let primeEdge = 0.01;      // raw units; below this there is no edge to snap to
+        let primeSigma = 0.7;      // gauss width, texels
+        let primeHardK = 20.0;     // hardening slope; high keeps the edge
+                                   // independent of the background
         let primeLayer = null;
         let primeAnchor = null;
         let primeErr = null;
@@ -1799,6 +1802,8 @@
                 'uniform float uBias;\n' +
                 'uniform float uSmooth;\n' +
                 'uniform float uEdgeT;\n' +
+                'uniform float uSigma;\n' +
+                'uniform float uHardK;\n' +
                 'uniform float uSubpix;\n' +
                 'uniform float uSoften;\n' +
                 'uniform vec2 uTexSize;\n' +
@@ -1957,12 +1962,12 @@
                 '    float e0 = edgeAt(horz, ia, ib, level);\n' +
                 '    if (e0 < -9000.0) return vec4(0.0, 0.0, 0.0, -1.0);\n' +
                 '    float L = 0.0;\n' +
-                '    for (int k = 0; k < 8; k++) {\n' +
+                '    for (int k = 0; k < 16; k++) {\n' +
                 '        if (edgeAt(horz, ia - L - 1.0, ib, level) != e0) break;\n' +
                 '        L += 1.0;\n' +
                 '    }\n' +
                 '    float R = 0.0;\n' +
-                '    for (int k = 0; k < 8; k++) {\n' +
+                '    for (int k = 0; k < 16; k++) {\n' +
                 '        if (edgeAt(horz, ia + R + 1.0, ib, level) != e0) break;\n' +
                 '        R += 1.0;\n' +
                 '    }\n' +
@@ -1975,16 +1980,41 @@
                 '        pos = e0 - 0.5 + (a - aStart) / N;\n' +
                 '    } else if (eL == e0 + 1.0 && eR == e0 - 1.0) {\n' +
                 '        pos = e0 + 0.5 - (a - aStart) / N;\n' +
-                '    } else if (eL > -9000.0 && eL == e0 - 1.0) {\n' +
-                '        pos = e0 - 0.5 + 0.5 * (a - aStart) / N;\n' +
-                '    } else if (eR > -9000.0 && eR == e0 + 1.0) {\n' +
-                '        pos = e0 + 0.5 * (a - aStart) / N;\n' +
+                /// anything that is not a clean ramp is "no stair found".
+                /// Guessing here is what produced the speckle.
                 '    } else {\n' +
                 '        return vec4(0.0, 0.0, 0.0, -1.0);\n' +
                 '    }\n' +
                 '    float nearS = horz ? texI(ia, e0 - 1.0) : texI(e0 - 1.0, ia);\n' +
                 '    float farS = horz ? texI(ia, e0) : texI(e0, ia);\n' +
                 '    return vec4(pos, nearS, farS, N);\n' +
+                '}\n' +
+                'float gaussHard(vec2 uv, float mn, float mx) {\n' +
+                '    float acc = 0.0;\n' +
+                '    float w = 0.0;\n' +
+                '    for (int j = -2; j <= 2; j++) {\n' +
+                '        for (int i = -2; i <= 2; i++) {\n' +
+                '            float r = biRaw(uv + vec2(float(i), float(j)) / uTexSize);\n' +
+                '            if (r <= 0.0) continue;\n' +
+                '            float g = exp(-(float(i * i + j * j)) / (2.0 * uSigma * uSigma));\n' +
+                '            acc += r * g; w += g;\n' +
+                '        }\n' +
+                '    }\n' +
+                '    if (w <= 0.0) return 0.0;\n' +
+                '    float blur = acc / w;\n' +
+                '    float rng = mx - mn;\n' +
+                /// fade in the hardening rather than switching to it: a hard
+                /// switch between two formulas is itself a discontinuity
+                '    float f0 = uEdgeT * 0.5;\n' +
+                '    float f1 = uEdgeT * 1.5;\n' +
+                '    float wh = clamp((rng - f0) / max(1e-6, f1 - f0), 0.0, 1.0);\n' +
+                '    wh = wh * wh * (3.0 - 2.0 * wh);\n' +
+                '    if (wh <= 0.0) return blur;\n' +
+                /// t is a COVERAGE fraction, normalised by the local contrast,
+                /// so the hardened edge does not move when the background does
+                '    float t = (blur - mn) / max(rng, 1e-6);\n' +
+                '    float th = clamp((t - 0.5) * uHardK + 0.5, 0.0, 1.0);\n' +
+                '    return blur + ((mn + rng * th) - blur) * wh;\n' +
                 '}\n' +
                 'float mlaaRaw(vec2 uv) {\n' +
                 '    vec2 t = uv * uTexSize;\n' +
@@ -2000,16 +2030,19 @@
                 '    }\n' +
                 '    if (mx - mn < uEdgeT) return biRaw(uv);\n' +
                 '    float level = 0.5 * (mn + mx);\n' +
-                '    int c = clsAt(ix, iy, level);\n' +
-                '    bool flipV = (clsAt(ix, iy - 1.0, level) != c) || (clsAt(ix, iy + 1.0, level) != c);\n' +
-                '    bool flipH = (clsAt(ix - 1.0, iy, level) != c) || (clsAt(ix + 1.0, iy, level) != c);\n' +
-                '    vec4 r;\n' +
-                '    float b;\n' +
-                '    if (flipV) { r = mlaaAxis(true, t, level); b = t.y; }\n' +
-                '    else if (flipH) { r = mlaaAxis(false, t, level); b = t.x; }\n' +
-                '    else return biRaw(uv);\n' +
-                '    if (r.w < 2.0) return biRaw(uv);\n' +
-                '    return b < r.x ? r.y : r.z;\n' +
+                /// both axes: the longer run is the shallower edge. Choosing an
+                /// axis up front gets steep edges wrong.
+                '    vec4 hh = mlaaAxis(true, t, level);\n' +
+                '    vec4 vv = mlaaAxis(false, t, level);\n' +
+                '    vec4 r = (hh.w >= vv.w) ? hh : vv;\n' +
+                '    float b = (hh.w >= vv.w) ? t.y : t.x;\n' +
+                /// a clean stair was found -> a hard pick between two MEASURED
+                /// depths. No blending, so the silhouette cannot change shape
+                /// when the background moves.
+                '    if (r.w >= 2.0) return b < r.x ? r.y : r.z;\n' +
+                /// no clean stair: MLAA has nothing to say here, and this is
+                /// exactly where gauss+harden is at its best
+                '    return gaussHard(uv, mn, mx);\n' +
                 '}\n' +
                 'float sampleRaw(vec2 uv) {\n' +
                 '    if (uSmooth < 0.5) return texture(uDepth, vec3(uv, uLayer)).r;\n' +
@@ -2073,6 +2106,8 @@
                 uBias: gl.getUniformLocation(prog, 'uBias'),
                 uSmooth: gl.getUniformLocation(prog, 'uSmooth'),
                 uEdgeT: gl.getUniformLocation(prog, 'uEdgeT'),
+                uSigma: gl.getUniformLocation(prog, 'uSigma'),
+                uHardK: gl.getUniformLocation(prog, 'uHardK'),
                 uSubpix: gl.getUniformLocation(prog, 'uSubpix'),
                 uSoften: gl.getUniformLocation(prog, 'uSoften'),
                 uTexSize: gl.getUniformLocation(prog, 'uTexSize')
@@ -2112,6 +2147,8 @@
             gl.uniform1f(g.uBias, primeBias);
             gl.uniform1f(g.uSmooth, primeSmooth);
             gl.uniform1f(g.uEdgeT, primeEdge);
+            gl.uniform1f(g.uSigma, primeSigma);
+            gl.uniform1f(g.uHardK, primeHardK);
             gl.uniform1f(g.uSubpix, primeSubpix);
             gl.uniform1f(g.uSoften, primeSoften);
             gl.uniform2f(g.uTexSize, di0.width || DEPTH_W, di0.height || DEPTH_H);
@@ -2609,7 +2646,8 @@
                     meaning: ['nearest (blocky)', 'bilinear (smooth, has a skirt)',
                               'bilinear + 3x3 tent', 'edge-snap (FXAA-flavoured)',
                               'FXAA (edge search + resample + feather)', '?',
-                              'MLAA (run-length edge reconstruction)'][primeSmooth] || '?',
+                              'MLAA strict + gauss-harden'][primeSmooth] || '?',
+                    sigma: primeSigma, hardK: primeHardK,
                     soften: primeSoften,
                     edgeThreshold: primeEdge,
                     subpix: primeSubpix
@@ -2622,6 +2660,11 @@
             soften: function (r) {
                 if (isFinite(r)) primeSoften = r;
                 return { soften: primeSoften, note: '0 = crisp FXAA, texels of the depth map' };
+            },
+            gauss: function (sigma, k) {
+                if (isFinite(sigma)) primeSigma = sigma;
+                if (isFinite(k)) primeHardK = k;
+                return { sigma: primeSigma, hardK: primeHardK };
             },
             smoothEdge: function (t) {
                 if (isFinite(t)) primeEdge = t;
