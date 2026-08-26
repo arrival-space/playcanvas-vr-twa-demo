@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 66;
+        const BUILD = 67;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1715,6 +1715,7 @@
         let primeProg = null;
         let primeOn = false;
         let primeBias = 0.02;      // metres; push the real world slightly back
+        let primeSmooth = 1;       // 0 nearest, 1 bilinear, 2 bilinear + 3x3 tent
         let primeLayer = null;
         let primeAnchor = null;
         let primeErr = null;
@@ -1774,11 +1775,46 @@
                 'uniform float uP10;\n' +
                 'uniform float uP14;\n' +
                 'uniform float uBias;\n' +
+                'uniform float uSmooth;\n' +
+                'uniform vec2 uTexSize;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
+                /// one tap, carrying its own validity as the weight
+                'vec2 tap(vec2 uv, float w) {\n' +
+                '    float r = texture(uDepth, vec3(uv, uLayer)).r;\n' +
+                '    return r > 0.0 ? vec2(r * w, w) : vec2(0.0);\n' +
+                '}\n' +
+                'float sampleRaw(vec2 uv) {\n' +
+                '    if (uSmooth < 0.5) return texture(uDepth, vec3(uv, uLayer)).r;\n' +
+                '    vec2 ts = uTexSize;\n' +
+                '    vec2 p = uv * ts - 0.5;\n' +
+                '    vec2 f = fract(p);\n' +
+                '    vec2 b = floor(p) + 0.5;\n' +
+                '    vec2 acc = vec2(0.0);\n' +
+                '    if (uSmooth < 1.5) {\n' +
+                /// bilinear, zero-aware
+                '        acc += tap((b + vec2(0.0, 0.0)) / ts, (1.0 - f.x) * (1.0 - f.y));\n' +
+                '        acc += tap((b + vec2(1.0, 0.0)) / ts, f.x * (1.0 - f.y));\n' +
+                '        acc += tap((b + vec2(0.0, 1.0)) / ts, (1.0 - f.x) * f.y);\n' +
+                '        acc += tap((b + vec2(1.0, 1.0)) / ts, f.x * f.y);\n' +
+                '    } else {\n' +
+                /// 3x3 tent on top, for a softer silhouette still
+                '        for (int j = -1; j <= 1; j++) {\n' +
+                '            for (int i = -1; i <= 1; i++) {\n' +
+                '                vec2 o = vec2(float(i), float(j));\n' +
+                '                vec2 d = abs(o + vec2(0.5) - f - vec2(0.5)) ;\n' +
+                '                float w = max(0.0, 1.0 - d.x) * max(0.0, 1.0 - d.y);\n' +
+                '                if (w > 0.0) acc += tap((b + o) / ts, w);\n' +
+                '            }\n' +
+                '        }\n' +
+                '    }\n' +
+                /// every tap was a hole -> report a hole, do not invent a surface
+                '    if (acc.y <= 0.0001) return 0.0;\n' +
+                '    return acc.x / acc.y;\n' +
+                '}\n' +
                 'void main() {\n' +
                 '    fragColor = vec4(0.0);\n' +
-                '    float raw = texture(uDepth, vec3(vUv, uLayer)).r;\n' +
+                '    float raw = sampleRaw(vUv);\n' +
                 /// no reading -> leave it at the far plane, occlude nothing
                 '    if (raw <= 0.0) { gl_FragDepth = 1.0; return; }\n' +
                 '    float invd = (1.0 / uNear) - raw * ((1.0 / uNear) - (1.0 / uFar));\n' +
@@ -1805,7 +1841,9 @@
                 uFar: gl.getUniformLocation(prog, 'uFar'),
                 uP10: gl.getUniformLocation(prog, 'uP10'),
                 uP14: gl.getUniformLocation(prog, 'uP14'),
-                uBias: gl.getUniformLocation(prog, 'uBias')
+                uBias: gl.getUniformLocation(prog, 'uBias'),
+                uSmooth: gl.getUniformLocation(prog, 'uSmooth'),
+                uTexSize: gl.getUniformLocation(prog, 'uTexSize')
             };
             console.log('[pcvr] depth prime program ready');
             return primeProg;
@@ -1840,6 +1878,8 @@
             gl.uniform1f(g.uNear, depthNear);
             gl.uniform1f(g.uFar, depthFar);
             gl.uniform1f(g.uBias, primeBias);
+            gl.uniform1f(g.uSmooth, primeSmooth);
+            gl.uniform2f(g.uTexSize, di0.width || DEPTH_W, di0.height || DEPTH_H);
 
             for (let i = 0; i < views.length; i++) {
                 const view = views[i];
@@ -2326,6 +2366,13 @@
             primeBias: function (m) {
                 if (isFinite(m)) primeBias = m;
                 return { bias: primeBias };
+            },
+            smooth: function (n) {
+                if (isFinite(n)) primeSmooth = n;
+                return {
+                    smooth: primeSmooth,
+                    meaning: ['nearest (blocky)', 'bilinear', 'bilinear + 3x3 tent'][primeSmooth] || '?'
+                };
             },
             primeStat: function () {
                 const ls = app.scene.layers;
