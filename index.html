@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 62;
+        const BUILD = 63;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -934,7 +934,8 @@
                 loadSplat();
                 setTimeout(function () {
                     ensureProbes();
-                    window.pcvr.occlude(true);
+                    window.pcvr.occlude(false);
+                    window.pcvr.debug(true);
                 }, 800);
             }
             hud.classList.add('hidden');
@@ -1061,8 +1062,14 @@
             if (!pose || !pose.views.length) return;
             const gl = app.graphicsDevice.gl;
             if (!xrBinding) xrBinding = new XRWebGLBinding(app.xr.session, gl);
-            const di = xrBinding.getDepthInformation(pose.views[0]);
-            if (di && di.texture) lastDi = di;
+            for (let i = 0; i < pose.views.length && i < 2; i++) {
+                let d = null;
+                try { d = xrBinding.getDepthInformation(pose.views[i]); } catch (e) { d = null; }
+                if (d && d.texture) {
+                    lastDiViews[i] = d;
+                    if (i === 0) lastDi = d;
+                }
+            }
         }
 
         /// ---- per-eye screen-space depth composite ----
@@ -1074,6 +1081,7 @@
         let eyeLo = 45000;
         let eyeHi = 65535;
         let lastDi = null;
+        const lastDiViews = [null, null];
         let sweepSpeed = 0.25;
         let sweepFixed = 0.5;
         let sweepBands = 4.0;
@@ -1355,6 +1363,264 @@
         }
 
         app.on('postrender', compositeEyes);
+
+        /// ---- occlusion DEBUG VIEW ---------------------------------------
+        /// Nothing here writes depth. It draws, per eye, what the occlusion
+        /// test would have concluded, so a wrong answer is visible instead of
+        /// just being a hole in the picture:
+        ///
+        ///   background   sensor distance as a blue->red ramp over dbgLo..dbgHi
+        ///                (transparent where the sensor returned nothing)
+        ///   white ring   where a probe sphere actually is on screen
+        ///   red fill     sensor says "something is IN FRONT of this sphere"
+        ///                -> this is the region that would have been cut away
+        ///   green fill   sensor says "sphere is in front", nothing to cut
+        ///
+        /// If the red blob is not sitting on your hand, the two are misaligned.
+        let dbgProg = null;
+        let dbgOn = false;
+        let dbgMode = 1;          // 0 ramp only, 1 ramp + probe test, 2 test only
+        let dbgLo = 0.15;         // metres at the blue end
+        let dbgHi = 2.0;          // metres at the red end
+        let dbgAlpha = 0.5;
+        let dbgMetric = 0;        // 0 = projective near/far guess, 1 = API depthValueToMeters
+        let dbgUseUv = 1;         // apply the API depthUvMatrix
+        let dbgPerView = 1;       // per-view depth info + imageIndex, not layer==eye
+
+        function initDbgProg() {
+            const gl = app.graphicsDevice.gl;
+            if (dbgProg) return dbgProg;
+
+            const vs = compileShader(gl, gl.VERTEX_SHADER,
+                '#version 300 es\n' +
+                'out vec2 vUv;\n' +
+                'void main() {\n' +
+                '    vec2 q = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n' +
+                '    vUv = q;\n' +
+                '    gl_Position = vec4(q * 2.0 - 1.0, 0.0, 1.0);\n' +
+                '}\n');
+
+            const fs = compileShader(gl, gl.FRAGMENT_SHADER,
+                '#version 300 es\n' +
+                'precision highp float;\n' +
+                'precision highp sampler2DArray;\n' +
+                'uniform sampler2DArray uDepth;\n' +
+                'uniform float uLayer;\n' +
+                'uniform float uNear;\n' +
+                'uniform float uFar;\n' +
+                'uniform float uD2M;\n' +
+                'uniform float uMetric;\n' +
+                'uniform mat3 uUvM;\n' +
+                'uniform float uUseUv;\n' +
+                'uniform float uLo;\n' +
+                'uniform float uHi;\n' +
+                'uniform float uAlpha;\n' +
+                'uniform float uMode;\n' +
+                'uniform float uAspect;\n' +
+                'uniform float uNumProbes;\n' +
+                'uniform vec4 uProbe[4];\n' +
+                'in vec2 vUv;\n' +
+                'out vec4 fragColor;\n' +
+                'vec3 ramp(float t) {\n' +
+                '    t = clamp(t, 0.0, 1.0);\n' +
+                '    return clamp(vec3(1.6 - abs(4.0 * t - 3.0),\n' +
+                '                      1.6 - abs(4.0 * t - 2.0),\n' +
+                '                      1.6 - abs(4.0 * t - 1.0)), 0.0, 1.0);\n' +
+                '}\n' +
+                'void main() {\n' +
+                '    vec2 duv = uUseUv > 0.5 ? (uUvM * vec3(vUv, 1.0)).xy : vUv;\n' +
+                '    float raw = texture(uDepth, vec3(duv, uLayer)).r;\n' +
+                '    vec3 col = vec3(0.0);\n' +
+                '    float a = 0.0;\n' +
+                '    float dm = -1.0;\n' +
+                '    if (raw > 0.0) {\n' +
+                '        if (uMetric < 0.5) {\n' +
+                '            float invd = (1.0 / uNear) - raw * ((1.0 / uNear) - (1.0 / uFar));\n' +
+                '            dm = 1.0 / max(invd, 0.0001);\n' +
+                '        } else {\n' +
+                '            dm = raw * 65535.0 * uD2M;\n' +
+                '        }\n' +
+                '        if (uMode < 1.5) {\n' +
+                '            col = ramp((dm - uLo) / max(0.0001, uHi - uLo));\n' +
+                '            a = uAlpha;\n' +
+                '        }\n' +
+                '    }\n' +
+                '    if (uMode > 0.5) {\n' +
+                '        vec2 ndc = vUv * 2.0 - 1.0;\n' +
+                '        for (int i = 0; i < 4; i++) {\n' +
+                '            if (float(i) >= uNumProbes) break;\n' +
+                '            vec4 pr = uProbe[i];\n' +
+                '            if (pr.z <= 0.0) continue;\n' +
+                '            vec2 dd = ndc - pr.xy;\n' +
+                '            dd.x *= uAspect;\n' +
+                '            float r = length(dd);\n' +
+                '            if (r < pr.z) {\n' +
+                '                if (dm < 0.0) {\n' +
+                '                    col = mix(col, vec3(0.5), 0.5); a = max(a, 0.35);\n' +
+                '                } else if (dm < pr.w) {\n' +
+                '                    col = mix(col, vec3(1.0, 0.0, 0.0), 0.8); a = max(a, 0.6);\n' +
+                '                } else {\n' +
+                '                    col = mix(col, vec3(0.0, 0.5, 0.0), 0.45); a = max(a, 0.4);\n' +
+                '                }\n' +
+                '            } else if (r < pr.z * 1.05) {\n' +
+                '                col = vec3(1.0); a = 0.95;\n' +
+                '            }\n' +
+                '        }\n' +
+                '    }\n' +
+                '    if (a <= 0.0) discard;\n' +
+                '    fragColor = vec4(col, a);\n' +
+                '}\n');
+            if (!vs || !fs) return null;
+
+            const prog = gl.createProgram();
+            gl.attachShader(prog, vs);
+            gl.attachShader(prog, fs);
+            gl.linkProgram(prog);
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                console.log('[pcvr] debug program link failed: ' + gl.getProgramInfoLog(prog));
+                return null;
+            }
+            dbgProg = {
+                prog: prog,
+                uDepth: gl.getUniformLocation(prog, 'uDepth'),
+                uLayer: gl.getUniformLocation(prog, 'uLayer'),
+                uNear: gl.getUniformLocation(prog, 'uNear'),
+                uFar: gl.getUniformLocation(prog, 'uFar'),
+                uD2M: gl.getUniformLocation(prog, 'uD2M'),
+                uMetric: gl.getUniformLocation(prog, 'uMetric'),
+                uUvM: gl.getUniformLocation(prog, 'uUvM'),
+                uUseUv: gl.getUniformLocation(prog, 'uUseUv'),
+                uLo: gl.getUniformLocation(prog, 'uLo'),
+                uHi: gl.getUniformLocation(prog, 'uHi'),
+                uAlpha: gl.getUniformLocation(prog, 'uAlpha'),
+                uMode: gl.getUniformLocation(prog, 'uMode'),
+                uAspect: gl.getUniformLocation(prog, 'uAspect'),
+                uNumProbes: gl.getUniformLocation(prog, 'uNumProbes'),
+                uProbe: gl.getUniformLocation(prog, 'uProbe[0]')
+            };
+            console.log('[pcvr] debug view program ready');
+            return dbgProg;
+        }
+
+        /// where each probe lands on screen for THIS eye, plus how far away it is
+        const probeBuf = new Float32Array(16);
+        const dbgUv = new Float32Array(9);
+        function fillProbes(view) {
+            probeBuf.fill(0);
+            if (!probes || !probes.length) return 0;
+            const pm = view.projMat && view.projMat.data;
+            const vmm = view._viewMat && view._viewMat.data;
+            if (!pm || !vmm) return 0;
+            const n = Math.min(4, probes.length);
+            for (let i = 0; i < n; i++) {
+                const wp = probes[i].getPosition();
+                const x = wp.x, y = wp.y, z = wp.z;
+                /// world -> eye space
+                const ex = vmm[0] * x + vmm[4] * y + vmm[8] * z + vmm[12];
+                const ey = vmm[1] * x + vmm[5] * y + vmm[9] * z + vmm[13];
+                const ez = vmm[2] * x + vmm[6] * y + vmm[10] * z + vmm[14];
+                const dist = -ez;
+                if (dist <= 0.02) { probeBuf[i * 4 + 2] = 0; continue; }
+                /// eye space -> clip, off-axis frustum included
+                const cx = pm[0] * ex + pm[4] * ey + pm[8] * ez + pm[12];
+                const cy = pm[1] * ex + pm[5] * ey + pm[9] * ez + pm[13];
+                const cw = dist;
+                const radius = probes[i].getLocalScale().x * 0.5;
+                probeBuf[i * 4 + 0] = cx / cw;
+                probeBuf[i * 4 + 1] = cy / cw;
+                probeBuf[i * 4 + 2] = radius * pm[5] / dist;
+                probeBuf[i * 4 + 3] = dist;
+            }
+            return n;
+        }
+
+        function drawDebug() {
+            if (!dbgOn || !app.xr.active) return;
+            const views = app.xr.views.list;
+            if (!views.length) return;
+            const di0 = lastDiViews[0] || lastDi;
+            if (!di0 || !di0.texture) return;
+            const gl = app.graphicsDevice.gl;
+            const g = initDbgProg();
+            if (!g) return;
+
+            const prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
+            const prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+            const prevVp = gl.getParameter(gl.VIEWPORT);
+            const prevBlend = gl.isEnabled(gl.BLEND);
+            const prevDepth = gl.isEnabled(gl.DEPTH_TEST);
+            const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
+            const prevActive = gl.getParameter(gl.ACTIVE_TEXTURE);
+
+            let xrFb = null;
+            try { xrFb = app.xr.session.renderState.baseLayer.framebuffer; } catch (e) {}
+            const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+            if (xrFb !== undefined) gl.bindFramebuffer(gl.FRAMEBUFFER, xrFb);
+
+            gl.bindVertexArray(null);
+            gl.useProgram(g.prog);
+            gl.disable(gl.DEPTH_TEST);
+            gl.disable(gl.SCISSOR_TEST);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            const UNIT = 12;
+            gl.activeTexture(gl.TEXTURE0 + UNIT);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.uniform1i(g.uDepth, UNIT);
+            gl.uniform1f(g.uNear, depthNear);
+            gl.uniform1f(g.uFar, depthFar);
+            gl.uniform1f(g.uMetric, dbgMetric);
+            gl.uniform1f(g.uUseUv, dbgUseUv);
+            gl.uniform1f(g.uLo, dbgLo);
+            gl.uniform1f(g.uHi, dbgHi);
+            gl.uniform1f(g.uAlpha, dbgAlpha);
+            gl.uniform1f(g.uMode, dbgMode);
+
+            for (let i = 0; i < views.length; i++) {
+                const view = views[i];
+                const di = (dbgPerView > 0.5 && lastDiViews[i]) ? lastDiViews[i] : di0;
+                const vp = view.viewport;
+                gl.viewport(vp.x, vp.y, vp.z, vp.w);
+                gl.bindTexture(gl.TEXTURE_2D_ARRAY, di.texture);
+                /// imageIndex is the authoritative array slice for this eye
+                const layer = (di.imageIndex !== undefined && di.imageIndex !== null)
+                    ? di.imageIndex : i;
+                gl.uniform1f(g.uLayer, layer);
+                gl.uniform1f(g.uD2M, di.rawValueToMeters || view.depthValueToMeters || 1.0);
+                /// depthUvMatrix maps normalised view UV -> normalised depth UV.
+                /// PlayCanvas hands it over as a Mat4; take the 2D affine part.
+                const m = view.depthUvMatrix && view.depthUvMatrix.data;
+                if (m) {
+                    dbgUv[0] = m[0]; dbgUv[1] = m[1]; dbgUv[2] = 0;
+                    dbgUv[3] = m[4]; dbgUv[4] = m[5]; dbgUv[5] = 0;
+                    dbgUv[6] = m[12]; dbgUv[7] = m[13]; dbgUv[8] = 1;
+                } else {
+                    dbgUv[0] = 1; dbgUv[1] = 0; dbgUv[2] = 0;
+                    dbgUv[3] = 0; dbgUv[4] = 1; dbgUv[5] = 0;
+                    dbgUv[6] = 0; dbgUv[7] = 0; dbgUv[8] = 1;
+                }
+                gl.uniformMatrix3fv(g.uUvM, false, dbgUv);
+                gl.uniform1f(g.uAspect, vp.z / Math.max(1, vp.w));
+                const n = fillProbes(view);
+                gl.uniform1f(g.uNumProbes, n);
+                gl.uniform4fv(g.uProbe, probeBuf);
+                gl.drawArrays(gl.TRIANGLES, 0, 3);
+            }
+
+            if (prevFb !== undefined) gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+            gl.useProgram(prevProg);
+            gl.bindVertexArray(prevVao);
+            gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+            gl.activeTexture(prevActive);
+            if (!prevBlend) gl.disable(gl.BLEND);
+            if (prevDepth) gl.enable(gl.DEPTH_TEST);
+            if (prevScissor) gl.enable(gl.SCISSOR_TEST);
+        }
+
+        app.on('postrender', drawDebug);
+
+
 
         /// ---- world-space depth reconstruction ----
         const CLOUD_STEP = 2;                     // sample every Nth texel
@@ -1775,6 +2041,74 @@
                 if (!splatEntity) return 'not loaded';
                 splatEntity.setLocalEulerAngles(rx || 0, ry || 0, rz || 0);
                 return { euler: [rx || 0, ry || 0, rz || 0] };
+            },
+            debug: function (v) {
+                dbgOn = v === undefined ? true : !!v;
+                if (dbgOn) {
+                    occOn = false;
+                    eyeOn = false;
+                    camera.camera.clearDepthBuffer = true;
+                    if (cloudEntity) cloudEntity.enabled = false;
+                    ensureProbes();
+                }
+                return { debug: dbgOn, mode: dbgMode, metric: dbgMetric ? 'api-d2m' : 'projective' };
+            },
+            dbgMode: function (m) {
+                if (isFinite(m)) dbgMode = m;
+                return { mode: dbgMode, meaning: ['ramp only', 'ramp + probe test', 'probe test only'][dbgMode] };
+            },
+            dbgRange: function (lo, hi) {
+                if (isFinite(lo)) dbgLo = lo;
+                if (isFinite(hi)) dbgHi = hi;
+                return { lo: dbgLo, hi: dbgHi };
+            },
+            dbgAlpha: function (a) {
+                if (isFinite(a)) dbgAlpha = a;
+                return { alpha: dbgAlpha };
+            },
+            dbgMetric: function (v) {
+                if (v !== undefined) dbgMetric = v ? 1 : 0;
+                return { metric: dbgMetric ? 'api depthValueToMeters (linear)' : 'projective near/far' };
+            },
+            dbgUv: function (v) {
+                if (v !== undefined) dbgUseUv = v ? 1 : 0;
+                return { useDepthUvMatrix: !!dbgUseUv };
+            },
+            dbgPerView: function (v) {
+                if (v !== undefined) dbgPerView = v ? 1 : 0;
+                return { perView: !!dbgPerView };
+            },
+            /// everything the API actually says, rather than what we assumed
+            dbg: function () {
+                const out = { build: BUILD, active: app.xr.active, probes: probes ? probes.length : 0 };
+                const views = app.xr.views.list;
+                out.views = views.map(function (v, i) {
+                    const di = lastDiViews[i];
+                    const uv = v.depthUvMatrix && v.depthUvMatrix.data;
+                    return {
+                        eye: v.eye,
+                        haveDi: !!(di && di.texture),
+                        imageIndex: di ? di.imageIndex : null,
+                        rawValueToMeters: di ? di.rawValueToMeters : null,
+                        depthValueToMeters: v.depthValueToMeters,
+                        depthW: di ? di.width : null,
+                        depthH: di ? di.height : null,
+                        uvMat: uv ? [uv[0], uv[1], uv[4], uv[5], uv[12], uv[13]] : null,
+                        proj: v.projMat ? Array.from(v.projMat.data).map(function (n) { return +n.toFixed(4); }) : null,
+                        viewport: v.viewport ? [v.viewport.x, v.viewport.y, v.viewport.z, v.viewport.w] : null
+                    };
+                });
+                if (views.length && probes) {
+                    fillProbes(views[0]);
+                    out.probeScreen = Array.from(probeBuf).map(function (n) { return +n.toFixed(4); });
+                }
+                out.settings = {
+                    mode: dbgMode, lo: dbgLo, hi: dbgHi, alpha: dbgAlpha,
+                    metric: dbgMetric ? 'api-d2m' : 'projective',
+                    near: depthNear, far: depthFar,
+                    useUv: !!dbgUseUv, perView: !!dbgPerView
+                };
+                return out;
             },
             occlude: function (v) {
                 occOn = !!v;
