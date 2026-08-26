@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 63;
+        const BUILD = 64;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -415,6 +415,8 @@
         let xrBinding = null;
         let lastXrFrame = null;
         let depthFrameLoopStarted = false;
+        let depthGateErr = null;
+        let depthRefreshCount = 0;
         let depthLogged = false;
         let depthErrLogged = false;
         let depthFmtLogged = false;
@@ -448,8 +450,8 @@
                 lastFrameTime = time;
                 /// refresh the depth handle every frame so the composite samples
                 /// the current frame, not whatever the last readback captured
-                if (eyeOn || occOn) {
-                    try { refreshDepthInfo(frame); } catch (e) { /* transient */ }
+                if (eyeOn || occOn || dbgOn) {
+                    try { refreshDepthInfo(frame); } catch (e) { depthGateErr = e.message; }
                 }
                 /// the depth texture is opaque: it is only a legal GL object inside
                 /// the frame callback that produced it. Doing the pass later (from
@@ -1055,11 +1057,13 @@
         /// cheap per-frame handle refresh - no GPU stall
         function refreshDepthInfo(frame) {
             const views = app.xr.views;
-            if (!views.availableDepth) return;
+            if (!views.availableDepth) { depthGateErr = 'availableDepth false'; return; }
             const space = app.xr._referenceSpace;
-            if (!space) return;
+            if (!space) { depthGateErr = 'no reference space'; return; }
             const pose = frame.getViewerPose(space);
-            if (!pose || !pose.views.length) return;
+            if (!pose || !pose.views.length) { depthGateErr = 'no viewer pose'; return; }
+            depthGateErr = null;
+            depthRefreshCount++;
             const gl = app.graphicsDevice.gl;
             if (!xrBinding) xrBinding = new XRWebGLBinding(app.xr.session, gl);
             for (let i = 0; i < pose.views.length && i < 2; i++) {
@@ -2098,9 +2102,24 @@
                         viewport: v.viewport ? [v.viewport.x, v.viewport.y, v.viewport.z, v.viewport.w] : null
                     };
                 });
-                if (views.length && probes) {
-                    fillProbes(views[0]);
-                    out.probeScreen = Array.from(probeBuf).map(function (n) { return +n.toFixed(4); });
+                out.depth = {
+                    availableDepth: app.xr.views.availableDepth,
+                    refreshes: depthRefreshCount,
+                    gateErr: depthGateErr,
+                    eyeOn: eyeOn, occOn: occOn, dbgOn: dbgOn,
+                    haveTex0: !!(lastDiViews[0] && lastDiViews[0].texture),
+                    haveTex1: !!(lastDiViews[1] && lastDiViews[1].texture)
+                };
+                if (views.length) {
+                    const v0 = views[0];
+                    const n = fillProbes(v0);
+                    out.probeN = n;
+                    out.probeInputs = {
+                        hasProj: !!(v0.projMat && v0.projMat.data),
+                        hasView: !!(v0._viewMat && v0._viewMat.data),
+                        probesLen: probes ? probes.length : null
+                    };
+                    out.probeScreen = Array.from(probeBuf).map(function (n2) { return +n2.toFixed(4); });
                 }
                 out.settings = {
                     mode: dbgMode, lo: dbgLo, hi: dbgHi, alpha: dbgAlpha,
