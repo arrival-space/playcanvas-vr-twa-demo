@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 67;
+        const BUILD = 68;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1715,7 +1715,8 @@
         let primeProg = null;
         let primeOn = false;
         let primeBias = 0.02;      // metres; push the real world slightly back
-        let primeSmooth = 1;       // 0 nearest, 1 bilinear, 2 bilinear + 3x3 tent
+        let primeSmooth = 3;       // 0 nearest, 1 bilinear, 2 tent, 3 edge-snap
+        let primeEdge = 0.01;      // raw units; below this there is no edge to snap to
         let primeLayer = null;
         let primeAnchor = null;
         let primeErr = null;
@@ -1776,6 +1777,7 @@
                 'uniform float uP14;\n' +
                 'uniform float uBias;\n' +
                 'uniform float uSmooth;\n' +
+                'uniform float uEdgeT;\n' +
                 'uniform vec2 uTexSize;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
@@ -1784,33 +1786,53 @@
                 '    float r = texture(uDepth, vec3(uv, uLayer)).r;\n' +
                 '    return r > 0.0 ? vec2(r * w, w) : vec2(0.0);\n' +
                 '}\n' +
-                'float sampleRaw(vec2 uv) {\n' +
-                '    if (uSmooth < 0.5) return texture(uDepth, vec3(uv, uLayer)).r;\n' +
+                /// blended value plus the local near/far extremes, zeros excluded
+                'vec3 gather(vec2 uv) {\n' +
                 '    vec2 ts = uTexSize;\n' +
                 '    vec2 p = uv * ts - 0.5;\n' +
                 '    vec2 f = fract(p);\n' +
                 '    vec2 b = floor(p) + 0.5;\n' +
                 '    vec2 acc = vec2(0.0);\n' +
-                '    if (uSmooth < 1.5) {\n' +
-                /// bilinear, zero-aware
-                '        acc += tap((b + vec2(0.0, 0.0)) / ts, (1.0 - f.x) * (1.0 - f.y));\n' +
-                '        acc += tap((b + vec2(1.0, 0.0)) / ts, f.x * (1.0 - f.y));\n' +
-                '        acc += tap((b + vec2(0.0, 1.0)) / ts, (1.0 - f.x) * f.y);\n' +
-                '        acc += tap((b + vec2(1.0, 1.0)) / ts, f.x * f.y);\n' +
-                '    } else {\n' +
-                /// 3x3 tent on top, for a softer silhouette still
+                '    float mn = 1.0;\n' +
+                '    float mx = 0.0;\n' +
+                '    for (int j = 0; j <= 1; j++) {\n' +
+                '        for (int i = 0; i <= 1; i++) {\n' +
+                '            vec2 o = vec2(float(i), float(j));\n' +
+                '            float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);\n' +
+                '            float r = texture(uDepth, vec3((b + o) / ts, uLayer)).r;\n' +
+                '            if (r > 0.0) { acc += vec2(r * w, w); mn = min(mn, r); mx = max(mx, r); }\n' +
+                '        }\n' +
+                '    }\n' +
+                '    if (acc.y <= 0.0001) return vec3(0.0);\n' +
+                '    return vec3(acc.x / acc.y, mn, mx);\n' +
+                '}\n' +
+                'float sampleRaw(vec2 uv) {\n' +
+                '    if (uSmooth < 0.5) return texture(uDepth, vec3(uv, uLayer)).r;\n' +
+                '    if (uSmooth > 1.5 && uSmooth < 2.5) {\n' +
+                /// wider tent, for comparison
+                '        vec2 ts = uTexSize;\n' +
+                '        vec2 p = uv * ts - 0.5;\n' +
+                '        vec2 f = fract(p);\n' +
+                '        vec2 b = floor(p) + 0.5;\n' +
+                '        vec2 acc = vec2(0.0);\n' +
                 '        for (int j = -1; j <= 1; j++) {\n' +
                 '            for (int i = -1; i <= 1; i++) {\n' +
                 '                vec2 o = vec2(float(i), float(j));\n' +
-                '                vec2 d = abs(o + vec2(0.5) - f - vec2(0.5)) ;\n' +
-                '                float w = max(0.0, 1.0 - d.x) * max(0.0, 1.0 - d.y);\n' +
-                '                if (w > 0.0) acc += tap((b + o) / ts, w);\n' +
+                '                vec2 d = abs(o - f);\n' +
+                '                float w = max(0.0, 1.0 - d.x * 0.5) * max(0.0, 1.0 - d.y * 0.5);\n' +
+                '                acc += tap((b + o) / ts, w);\n' +
                 '            }\n' +
                 '        }\n' +
+                '        return acc.y > 0.0001 ? acc.x / acc.y : 0.0;\n' +
                 '    }\n' +
-                /// every tap was a hole -> report a hole, do not invent a surface
-                '    if (acc.y <= 0.0001) return 0.0;\n' +
-                '    return acc.x / acc.y;\n' +
+                '    vec3 g = gather(uv);\n' +
+                '    if (g.y <= 0.0) return 0.0;\n' +
+                /// FXAA-flavoured: only act where there IS an edge, and then do
+                /// not average across it - pick the side the ramp is nearer to
+                '    if (uSmooth > 2.5 && (g.z - g.y) > uEdgeT) {\n' +
+                '        return (g.x - g.y) < (g.z - g.x) ? g.y : g.z;\n' +
+                '    }\n' +
+                '    return g.x;\n' +
                 '}\n' +
                 'void main() {\n' +
                 '    fragColor = vec4(0.0);\n' +
@@ -1843,6 +1865,7 @@
                 uP14: gl.getUniformLocation(prog, 'uP14'),
                 uBias: gl.getUniformLocation(prog, 'uBias'),
                 uSmooth: gl.getUniformLocation(prog, 'uSmooth'),
+                uEdgeT: gl.getUniformLocation(prog, 'uEdgeT'),
                 uTexSize: gl.getUniformLocation(prog, 'uTexSize')
             };
             console.log('[pcvr] depth prime program ready');
@@ -1879,6 +1902,7 @@
             gl.uniform1f(g.uFar, depthFar);
             gl.uniform1f(g.uBias, primeBias);
             gl.uniform1f(g.uSmooth, primeSmooth);
+            gl.uniform1f(g.uEdgeT, primeEdge);
             gl.uniform2f(g.uTexSize, di0.width || DEPTH_W, di0.height || DEPTH_H);
 
             for (let i = 0; i < views.length; i++) {
@@ -2371,8 +2395,14 @@
                 if (isFinite(n)) primeSmooth = n;
                 return {
                     smooth: primeSmooth,
-                    meaning: ['nearest (blocky)', 'bilinear', 'bilinear + 3x3 tent'][primeSmooth] || '?'
+                    meaning: ['nearest (blocky)', 'bilinear (smooth, has a skirt)',
+                              'bilinear + 3x3 tent', 'edge-snap (FXAA-flavoured)'][primeSmooth] || '?',
+                    edgeThreshold: primeEdge
                 };
+            },
+            smoothEdge: function (t) {
+                if (isFinite(t)) primeEdge = t;
+                return { edgeThreshold: primeEdge };
             },
             primeStat: function () {
                 const ls = app.scene.layers;
