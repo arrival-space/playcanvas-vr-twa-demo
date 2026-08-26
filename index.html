@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 80;
+        const BUILD = 81;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1975,7 +1975,6 @@
                 '        L += 1.0;\n' +
                 '    }\n' +
                 '    float R = 0.0;\n' +
-                '    int rmax = int(uRunMax);\n' +
                 '    for (int k = 0; k < rmax; k++) {\n' +
                 '        if (edgeAt(horz, ia + R + 1.0, ib, level) != e0) break;\n' +
                 '        R += 1.0;\n' +
@@ -2095,7 +2094,13 @@
                 '    float zndc = -uP10 + uP14 / max(dm, 0.01);\n' +
                 '    gl_FragDepth = clamp((zndc + 1.0) * 0.5, 0.0, 1.0);\n' +
                 '}\n');
-            if (!vs || !fs) return null;
+            if (!vs || !fs) {
+                /// a COMPILE failure used to return null with primeErr still
+                /// null, so a broken shader looked like "nothing is happening"
+                primeErr = 'prime shader failed to compile (see console)';
+                console.log('[pcvr] ' + primeErr);
+                return null;
+            }
             const prog = gl.createProgram();
             gl.attachShader(prog, vs);
             gl.attachShader(prog, fs);
