@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 77;
+        const BUILD = 78;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -957,9 +957,10 @@
                     window.pcvr.occlude(false);
                     window.pcvr.prime(true);
                     /// the splat may still be loading; place it when it lands
-                    placeSplatOnDesk();
+                    placeSplatOnDesk(true);
                 }, 800);
-                setTimeout(placeSplatOnDesk, 2500);
+                /// the splat may still have been loading; place, do not re-anchor
+                setTimeout(function () { placeSplatOnDesk(false); }, 2500);
             }
             hud.classList.add('hidden');
             /// transparent clear in AR so the real room shows behind the scene
@@ -2502,20 +2503,29 @@
 
         /// tuned on the headset: sits on the desk in front of a seated viewer
         let splatFwd = 0.56;      // metres ahead
-        let splatDrop = 0.49;     // metres below eye height
+        let splatDrop = 0.46;     // metres below eye height
         let splatScale = 0.20;
         let splatYaw = 90;        // degrees about world up
 
-        function placeSplatOnDesk() {
-            if (!splatEntity) return null;
+        /// captured once, so later tweaks cannot drag him around the room
+        let splatAnchor = null;
+
+        function captureSplatAnchor() {
             const cp = camera.getPosition().clone();
-            /// flatten the forward vector so it lands on the desk rather than
-            /// wherever the head happened to be pointing
             const f = camera.forward.clone();
             f.y = 0;
             if (f.length() < 0.001) f.set(0, 0, -1);
             f.normalize();
-            const wp = cp.clone().add(f.mulScalar(splatFwd));
+            splatAnchor = { pos: cp, fwd: f };
+            return splatAnchor;
+        }
+
+        function placeSplatOnDesk(reAnchor) {
+            if (!splatEntity) return null;
+            if (reAnchor || !splatAnchor) captureSplatAnchor();
+            const cp = splatAnchor.pos;
+            const f = splatAnchor.fwd;
+            const wp = cp.clone().add(f.clone().mulScalar(splatFwd));
             wp.y = cp.y - splatDrop;
             splatEntity.setPosition(wp);
             splatEntity.setLocalScale(splatScale, splatScale, splatScale);
@@ -2635,7 +2645,13 @@
                 if (isFinite(drop)) splatDrop = drop;
                 if (isFinite(scale)) splatScale = scale;
                 if (isFinite(yaw)) splatYaw = yaw;
-                return placeSplatOnDesk() || 'splat not loaded';
+                /// adjust against the stored anchor - never re-derive from the
+                /// live head pose, or a height tweak drags him sideways too
+                return placeSplatOnDesk(false) || 'splat not loaded';
+            },
+            /// deliberately re-anchor to where you are sitting now
+            deskHere: function () {
+                return placeSplatOnDesk(true) || 'splat not loaded';
             },
             splatPlace: function (x, y, z, scale) {
                 if (!splatEntity) return 'not loaded';
