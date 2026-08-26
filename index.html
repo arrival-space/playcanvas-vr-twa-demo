@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 70;
+        const BUILD = 71;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1718,6 +1718,7 @@
         let primeSmooth = 4;       // 0 nearest, 1 bilinear, 2 tent, 3 edge-snap, 4 fxaa
         let primeSubpix = 0.75;    // fxaa sub-pixel aliasing strength
         let primeSoften = 0.75;    // texels; feather applied AFTER edge reconstruction
+        let primeDither = 1.0;     // stochastic width of the transition band
         let primeEdge = 0.01;      // raw units; below this there is no edge to snap to
         let primeLayer = null;
         let primeAnchor = null;
@@ -1782,6 +1783,7 @@
                 'uniform float uEdgeT;\n' +
                 'uniform float uSubpix;\n' +
                 'uniform float uSoften;\n' +
+                'uniform float uDither;\n' +
                 'uniform vec2 uTexSize;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
@@ -1813,6 +1815,24 @@
                 'float lumaAt(vec2 uv, float c) {\n' +
                 '    float r = texture(uDepth, vec3(uv, uLayer)).r;\n' +
                 '    return r > 0.0 ? r : c;\n' +
+                '}\n' +
+                'float ign(vec2 p) {\n' +
+                '    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));\n' +
+                '}\n' +
+                /// how much depth disagreement is there right here? zero on a
+                /// flat surface, large across a silhouette
+                'float localRange(vec2 uv) {\n' +
+                '    vec2 rcp = 1.0 / uTexSize;\n' +
+                '    float mn = 1.0;\n' +
+                '    float mx = 0.0;\n' +
+                '    for (int j = -1; j <= 1; j++) {\n' +
+                '        for (int i = -1; i <= 1; i++) {\n' +
+                '            vec2 o = vec2(float(i), float(j)) * rcp;\n' +
+                '            float r0 = texture(uDepth, vec3(uv + o, uLayer)).r;\n' +
+                '            if (r0 > 0.0) { mn = min(mn, r0); mx = max(mx, r0); }\n' +
+                '        }\n' +
+                '    }\n' +
+                '    return mx > mn ? mx - mn : 0.0;\n' +
                 '}\n' +
                 'float tentAt(vec2 uv, float radius, float c) {\n' +
                 '    if (radius <= 0.001) {\n' +
@@ -1940,6 +1960,12 @@
                 '    float raw = sampleRaw(vUv);\n' +
                 /// no reading -> leave it at the far plane, occlude nothing
                 '    if (raw <= 0.0) { gl_FragDepth = 1.0; return; }\n' +
+                /// spread the pass/fail decision across the local depth range so
+                /// the binary test resolves stochastically instead of all-or-nothing
+                '    if (uDither > 0.0) {\n' +
+                '        float rng = localRange(vUv);\n' +
+                '        raw += (ign(gl_FragCoord.xy) - 0.5) * rng * uDither;\n' +
+                '    }\n' +
                 '    float invd = (1.0 / uNear) - raw * ((1.0 / uNear) - (1.0 / uFar));\n' +
                 '    float dm = 1.0 / max(invd, 0.0001) + uBias;\n' +
                 /// sensor metres -> NDC z for THIS eye's projection -> [0,1]
@@ -1969,6 +1995,7 @@
                 uEdgeT: gl.getUniformLocation(prog, 'uEdgeT'),
                 uSubpix: gl.getUniformLocation(prog, 'uSubpix'),
                 uSoften: gl.getUniformLocation(prog, 'uSoften'),
+                uDither: gl.getUniformLocation(prog, 'uDither'),
                 uTexSize: gl.getUniformLocation(prog, 'uTexSize')
             };
             console.log('[pcvr] depth prime program ready');
@@ -2008,6 +2035,7 @@
             gl.uniform1f(g.uEdgeT, primeEdge);
             gl.uniform1f(g.uSubpix, primeSubpix);
             gl.uniform1f(g.uSoften, primeSoften);
+            gl.uniform1f(g.uDither, primeDither);
             gl.uniform2f(g.uTexSize, di0.width || DEPTH_W, di0.height || DEPTH_H);
 
             for (let i = 0; i < views.length; i++) {
@@ -2515,6 +2543,14 @@
             soften: function (r) {
                 if (isFinite(r)) primeSoften = r;
                 return { soften: primeSoften, note: '0 = crisp FXAA, texels of the depth map' };
+            },
+            /// the only knob that actually softens the EDGE rather than moving it
+            dither: function (v) {
+                if (isFinite(v)) primeDither = v;
+                return {
+                    dither: primeDither,
+                    note: '0 = hard binary edge, 1 = band spans the local depth range'
+                };
             },
             smoothEdge: function (t) {
                 if (isFinite(t)) primeEdge = t;
