@@ -1,5 +1,10 @@
 # WebXR Depth Occlusion on Quest 3
 
+![A gaussian splat standing on a desk, with a real hand passing in front of it and cleanly occluding it](hero.jpg)
+
+*A gaussian splat on a real desk. The hand is real, the biker is not — and the
+depth sensors decide which is in front, per pixel, every frame.*
+
 Real-world occlusion in a **web page**. The Quest's depth sensors are read every
 frame and written straight into the depth buffer, so virtual objects — meshes
 *and* gaussian splats — are hidden by your hands, your desk and your room, with
