@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 74;
+        const BUILD = 75;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -415,6 +415,7 @@
         let xrBinding = null;
         let lastXrFrame = null;
         let depthFrameLoopStarted = false;
+        let depthLoopSession = null;
         let depthGateErr = null;
         let depthRefreshCount = 0;
         let depthLogged = false;
@@ -441,9 +442,12 @@
         const allowGpuBlit = true;
 
         function startDepthFrameLoop() {
-            if (depthFrameLoopStarted) return;
             const session = app.xr.session;
             if (!session) return;
+            /// keyed on the session, NOT a one-shot flag - re-entering XR makes
+            /// a new session and it needs its own loop
+            if (depthLoopSession === session) return;
+            depthLoopSession = session;
             depthFrameLoopStarted = true;
             const tick = function (time, frame) {
                 lastXrFrame = frame;
@@ -467,7 +471,12 @@
                         }
                     }
                 }
-                if (app.xr.session === session) session.requestAnimationFrame(tick);
+                if (app.xr.session === session) {
+                    session.requestAnimationFrame(tick);
+                } else if (depthLoopSession === session) {
+                    /// this session is over; let the next one start its own loop
+                    depthLoopSession = null;
+                }
             };
             session.requestAnimationFrame(tick);
         }
@@ -930,6 +939,16 @@
 
             app.xr.start(camera.camera, sessionType, pc.XRSPACE_LOCALFLOOR, opts);
         }
+
+        app.xr.on('end', function () {
+            /// these belong to the session that just ended
+            depthLoopSession = null;
+            lastDi = null;
+            lastDiViews[0] = null;
+            lastDiViews[1] = null;
+            xrBinding = null;
+            console.log('[pcvr] xr ended, depth handles dropped');
+        });
 
         app.xr.on('start', function () {
             if (demoOcclusion) {
@@ -2701,6 +2720,7 @@
                     refreshes: depthRefreshCount,
                     gateErr: depthGateErr,
                     eyeOn: eyeOn, occOn: occOn, dbgOn: dbgOn,
+                    loopAlive: depthLoopSession === app.xr.session,
                     haveTex0: !!(lastDiViews[0] && lastDiViews[0].texture),
                     haveTex1: !!(lastDiViews[1] && lastDiViews[1].texture)
                 };
