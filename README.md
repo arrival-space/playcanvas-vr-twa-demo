@@ -14,10 +14,10 @@ By [arrival.space](https://arrival.space).
 
 ## Try it
 
-**→ [Depth occlusion](https://fimbox.github.io/playcanvas-vr-twa-demo/?demo=occlusion)**
+**→ [Depth occlusion](https://arrival-space.github.io/playcanvas-vr-twa-demo/?demo=occlusion)**
 — a gaussian splat sitting on your desk, occluded by the real world.
 
-**→ [Depth peeling](https://fimbox.github.io/playcanvas-vr-twa-demo/)** — a
+**→ [Depth peeling](https://arrival-space.github.io/playcanvas-vr-twa-demo/)** — a
 lightning front sweeping outward through the depth field, mapped onto your
 hands in stereo.
 
