@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 78;
+        const BUILD = 79;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -2503,7 +2503,7 @@
 
         /// tuned on the headset: sits on the desk in front of a seated viewer
         let splatFwd = 0.56;      // metres ahead
-        let splatDrop = 0.46;     // metres below eye height
+        let splatDrop = 0.44;     // metres below eye height
         let splatScale = 0.20;
         let splatYaw = 90;        // degrees about world up
 
