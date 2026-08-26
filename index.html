@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 69;
+        const BUILD = 70;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1715,8 +1715,9 @@
         let primeProg = null;
         let primeOn = false;
         let primeBias = 0.02;      // metres; push the real world slightly back
-        let primeSmooth = 2;       // 0 nearest, 1 bilinear, 2 tent, 3 edge-snap, 4 fxaa
+        let primeSmooth = 4;       // 0 nearest, 1 bilinear, 2 tent, 3 edge-snap, 4 fxaa
         let primeSubpix = 0.75;    // fxaa sub-pixel aliasing strength
+        let primeSoften = 0.75;    // texels; feather applied AFTER edge reconstruction
         let primeEdge = 0.01;      // raw units; below this there is no edge to snap to
         let primeLayer = null;
         let primeAnchor = null;
@@ -1780,6 +1781,7 @@
                 'uniform float uSmooth;\n' +
                 'uniform float uEdgeT;\n' +
                 'uniform float uSubpix;\n' +
+                'uniform float uSoften;\n' +
                 'uniform vec2 uTexSize;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
@@ -1811,6 +1813,24 @@
                 'float lumaAt(vec2 uv, float c) {\n' +
                 '    float r = texture(uDepth, vec3(uv, uLayer)).r;\n' +
                 '    return r > 0.0 ? r : c;\n' +
+                '}\n' +
+                'float tentAt(vec2 uv, float radius, float c) {\n' +
+                '    if (radius <= 0.001) {\n' +
+                '        float r0 = texture(uDepth, vec3(uv, uLayer)).r;\n' +
+                '        return r0 > 0.0 ? r0 : c;\n' +
+                '    }\n' +
+                '    vec2 rcp = 1.0 / uTexSize;\n' +
+                '    float acc = 0.0;\n' +
+                '    float wsum = 0.0;\n' +
+                '    for (int j = -1; j <= 1; j++) {\n' +
+                '        for (int i = -1; i <= 1; i++) {\n' +
+                '            float w = (1.0 - abs(float(i)) * 0.5) * (1.0 - abs(float(j)) * 0.5);\n' +
+                '            vec2 o = vec2(float(i), float(j)) * radius * rcp;\n' +
+                '            float r0 = texture(uDepth, vec3(uv + o, uLayer)).r;\n' +
+                '            if (r0 > 0.0) { acc += r0 * w; wsum += w; }\n' +
+                '        }\n' +
+                '    }\n' +
+                '    return wsum > 0.0001 ? acc / wsum : c;\n' +
                 '}\n' +
                 'float fxaaDepth(vec2 uv) {\n' +
                 '    vec2 ts = uTexSize;\n' +
@@ -1884,8 +1904,7 @@
                 '    finalOff = max(finalOff, sp2 * sp2 * uSubpix);\n' +
                 '    vec2 fuv = uv;\n' +
                 '    if (horz) fuv.y += finalOff * stepLen; else fuv.x += finalOff * stepLen;\n' +
-                '    float r = texture(uDepth, vec3(fuv, uLayer)).r;\n' +
-                '    return r > 0.0 ? r : m;\n' +
+                '    return tentAt(fuv, uSoften, m);\n' +
                 '}\n' +
                 'float sampleRaw(vec2 uv) {\n' +
                 '    if (uSmooth < 0.5) return texture(uDepth, vec3(uv, uLayer)).r;\n' +
@@ -1949,6 +1968,7 @@
                 uSmooth: gl.getUniformLocation(prog, 'uSmooth'),
                 uEdgeT: gl.getUniformLocation(prog, 'uEdgeT'),
                 uSubpix: gl.getUniformLocation(prog, 'uSubpix'),
+                uSoften: gl.getUniformLocation(prog, 'uSoften'),
                 uTexSize: gl.getUniformLocation(prog, 'uTexSize')
             };
             console.log('[pcvr] depth prime program ready');
@@ -1987,6 +2007,7 @@
             gl.uniform1f(g.uSmooth, primeSmooth);
             gl.uniform1f(g.uEdgeT, primeEdge);
             gl.uniform1f(g.uSubpix, primeSubpix);
+            gl.uniform1f(g.uSoften, primeSoften);
             gl.uniform2f(g.uTexSize, di0.width || DEPTH_W, di0.height || DEPTH_H);
 
             for (let i = 0; i < views.length; i++) {
@@ -2481,7 +2502,8 @@
                     smooth: primeSmooth,
                     meaning: ['nearest (blocky)', 'bilinear (smooth, has a skirt)',
                               'bilinear + 3x3 tent', 'edge-snap (FXAA-flavoured)',
-                              'FXAA (edge search + resample)'][primeSmooth] || '?',
+                              'FXAA (edge search + resample + feather)'][primeSmooth] || '?',
+                    soften: primeSoften,
                     edgeThreshold: primeEdge,
                     subpix: primeSubpix
                 };
@@ -2489,6 +2511,10 @@
             subpix: function (v) {
                 if (isFinite(v)) primeSubpix = v;
                 return { subpix: primeSubpix };
+            },
+            soften: function (r) {
+                if (isFinite(r)) primeSoften = r;
+                return { soften: primeSoften, note: '0 = crisp FXAA, texels of the depth map' };
             },
             smoothEdge: function (t) {
                 if (isFinite(t)) primeEdge = t;
