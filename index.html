@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 79;
+        const BUILD = 80;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1742,6 +1742,8 @@
         let primeSoften = 0.75;    // texels; feather applied AFTER edge reconstruction
         let primeEdge = 0.01;      // raw units; below this there is no edge to snap to
         let primeSigma = 0.7;      // gauss width, texels
+        let primeGaussR = 2.0;     // gauss kernel radius, texels
+        let primeRunMax = 16.0;    // run search length; 14 covers a 4 degree edge
         let primeHardK = 20.0;     // hardening slope; high keeps the edge
                                    // independent of the background
         let primeLayer = null;
@@ -1807,6 +1809,8 @@
                 'uniform float uEdgeT;\n' +
                 'uniform float uSigma;\n' +
                 'uniform float uHardK;\n' +
+                'uniform float uGaussR;\n' +
+                'uniform float uRunMax;\n' +
                 'uniform float uSubpix;\n' +
                 'uniform float uSoften;\n' +
                 'uniform vec2 uTexSize;\n' +
@@ -1965,12 +1969,14 @@
                 '    float e0 = edgeAt(horz, ia, ib, level);\n' +
                 '    if (e0 < -9000.0) return vec4(0.0, 0.0, 0.0, -1.0);\n' +
                 '    float L = 0.0;\n' +
-                '    for (int k = 0; k < 16; k++) {\n' +
+                '    int rmax = int(uRunMax);\n' +
+                '    for (int k = 0; k < rmax; k++) {\n' +
                 '        if (edgeAt(horz, ia - L - 1.0, ib, level) != e0) break;\n' +
                 '        L += 1.0;\n' +
                 '    }\n' +
                 '    float R = 0.0;\n' +
-                '    for (int k = 0; k < 16; k++) {\n' +
+                '    int rmax = int(uRunMax);\n' +
+                '    for (int k = 0; k < rmax; k++) {\n' +
                 '        if (edgeAt(horz, ia + R + 1.0, ib, level) != e0) break;\n' +
                 '        R += 1.0;\n' +
                 '    }\n' +
@@ -1995,8 +2001,9 @@
                 'float gaussHard(vec2 uv, float mn, float mx) {\n' +
                 '    float acc = 0.0;\n' +
                 '    float w = 0.0;\n' +
-                '    for (int j = -2; j <= 2; j++) {\n' +
-                '        for (int i = -2; i <= 2; i++) {\n' +
+                '    int gr = int(uGaussR);\n' +
+                '    for (int j = -gr; j <= gr; j++) {\n' +
+                '        for (int i = -gr; i <= gr; i++) {\n' +
                 '            float r = biRaw(uv + vec2(float(i), float(j)) / uTexSize);\n' +
                 '            if (r <= 0.0) continue;\n' +
                 '            float g = exp(-(float(i * i + j * j)) / (2.0 * uSigma * uSigma));\n' +
@@ -2111,6 +2118,8 @@
                 uEdgeT: gl.getUniformLocation(prog, 'uEdgeT'),
                 uSigma: gl.getUniformLocation(prog, 'uSigma'),
                 uHardK: gl.getUniformLocation(prog, 'uHardK'),
+                uGaussR: gl.getUniformLocation(prog, 'uGaussR'),
+                uRunMax: gl.getUniformLocation(prog, 'uRunMax'),
                 uSubpix: gl.getUniformLocation(prog, 'uSubpix'),
                 uSoften: gl.getUniformLocation(prog, 'uSoften'),
                 uTexSize: gl.getUniformLocation(prog, 'uTexSize')
@@ -2152,6 +2161,8 @@
             gl.uniform1f(g.uEdgeT, primeEdge);
             gl.uniform1f(g.uSigma, primeSigma);
             gl.uniform1f(g.uHardK, primeHardK);
+            gl.uniform1f(g.uGaussR, primeGaussR);
+            gl.uniform1f(g.uRunMax, primeRunMax);
             gl.uniform1f(g.uSubpix, primeSubpix);
             gl.uniform1f(g.uSoften, primeSoften);
             gl.uniform2f(g.uTexSize, di0.width || DEPTH_W, di0.height || DEPTH_H);
@@ -2706,6 +2717,16 @@
             soften: function (r) {
                 if (isFinite(r)) primeSoften = r;
                 return { soften: primeSoften, note: '0 = crisp FXAA, texels of the depth map' };
+            },
+            /// the two loop bounds that drive the cost
+            cost: function (gaussR, runMax) {
+                if (isFinite(gaussR)) primeGaussR = gaussR;
+                if (isFinite(runMax)) primeRunMax = runMax;
+                return {
+                    gaussRadius: primeGaussR,
+                    gaussTaps: (2 * primeGaussR + 1) * (2 * primeGaussR + 1),
+                    runMax: primeRunMax
+                };
             },
             gauss: function (sigma, k) {
                 if (isFinite(sigma)) primeSigma = sigma;
