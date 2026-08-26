@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 76;
+        const BUILD = 77;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -954,10 +954,12 @@
             if (demoOcclusion) {
                 loadSplat();
                 setTimeout(function () {
-                    ensureProbes();
                     window.pcvr.occlude(false);
                     window.pcvr.prime(true);
+                    /// the splat may still be loading; place it when it lands
+                    placeSplatOnDesk();
                 }, 800);
+                setTimeout(placeSplatOnDesk, 2500);
             }
             hud.classList.add('hidden');
             /// transparent clear in AR so the real room shows behind the scene
@@ -2498,6 +2500,33 @@
             return probes;
         }
 
+        /// tuned on the headset: sits on the desk in front of a seated viewer
+        let splatFwd = 0.56;      // metres ahead
+        let splatDrop = 0.49;     // metres below eye height
+        let splatScale = 0.20;
+        let splatYaw = 90;        // degrees about world up
+
+        function placeSplatOnDesk() {
+            if (!splatEntity) return null;
+            const cp = camera.getPosition().clone();
+            /// flatten the forward vector so it lands on the desk rather than
+            /// wherever the head happened to be pointing
+            const f = camera.forward.clone();
+            f.y = 0;
+            if (f.length() < 0.001) f.set(0, 0, -1);
+            f.normalize();
+            const wp = cp.clone().add(f.mulScalar(splatFwd));
+            wp.y = cp.y - splatDrop;
+            splatEntity.setPosition(wp);
+            splatEntity.setLocalScale(splatScale, splatScale, splatScale);
+            /// yaw about world up composed with the model's X-flip, so the flip
+            /// cannot invert the direction of the turn
+            const yaw = new pc.Quat().setFromAxisAngle(pc.Vec3.UP, splatYaw);
+            const flip = new pc.Quat().setFromEulerAngles(180, 0, 0);
+            splatEntity.setRotation(yaw.mul(flip));
+            return { fwd: splatFwd, drop: splatDrop, scale: splatScale, yaw: splatYaw };
+        }
+
         /// ---- gaussian splat, for testing occlusion against real geometry ----
         let splatEntity = null;
         let splatAsset = null;
@@ -2514,15 +2543,9 @@
                 splatEntity = new pc.Entity('splat');
                 splatEntity.addComponent('gsplat', { asset: asset });
                 /// most captures come in Y-down relative to PlayCanvas
-                splatEntity.setLocalScale(0.6, 0.6, 0.6);
+                splatEntity.setLocalScale(splatScale, splatScale, splatScale);
                 app.root.addChild(splatEntity);
-                /// drop it in the room 1.4m ahead of where you are standing
-                const wp = camera.getPosition().clone();
-                const f = camera.forward.clone().mulScalar(1.4);
-                wp.add(f);
-                wp.y -= 0.2;
-                splatEntity.setPosition(wp);
-                splatEntity.setEulerAngles(180, 0, 0);
+                placeSplatOnDesk();
                 splatLoading = false;
                 console.log('[pcvr] splat loaded');
                 if (cb) cb(null, splatEntity);
@@ -2606,6 +2629,14 @@
                 if (splatEntity) splatEntity.enabled = true;
                 return { splat: true, loaded: !!splatEntity, loading: splatLoading };
             },
+            /// desk placement, relative to wherever you are sitting
+            desk: function (fwd, drop, scale, yaw) {
+                if (isFinite(fwd)) splatFwd = fwd;
+                if (isFinite(drop)) splatDrop = drop;
+                if (isFinite(scale)) splatScale = scale;
+                if (isFinite(yaw)) splatYaw = yaw;
+                return placeSplatOnDesk() || 'splat not loaded';
+            },
             splatPlace: function (x, y, z, scale) {
                 if (!splatEntity) return 'not loaded';
                 if (isFinite(x) && isFinite(y) && isFinite(z)) splatEntity.setLocalPosition(x, y, z);
@@ -2631,7 +2662,6 @@
                     eyeOn = false;
                     camera.camera.clearDepthBuffer = true;
                     requestSceneDepth(false);
-                    ensureProbes();
                 }
                 return { prime: primeOn, bias: primeBias, layer: !!primeLayer };
             },
