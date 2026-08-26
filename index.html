@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 61;
+        const BUILD = 62;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -949,7 +949,17 @@
             setStatus('session ended — tap to go back in');
         });
 
-        btn.addEventListener('click', function () { startXR('button'); });
+        btn.addEventListener('click', function () {
+            /// re-pick the session type at click time. The fallback timer below
+            /// fires while we are simply waiting for the user's tap, and used to
+            /// leave sessionType pinned to VR - which is why AR never started.
+            if (arMode && app.xr.isAvailable(pc.XRTYPE_AR)) {
+                sessionType = pc.XRTYPE_AR;
+                floor.enabled = false;
+            }
+            sessionRequested = false;
+            startXR('button');
+        });
 
         if (demoOcclusion) {
             document.querySelector('#hud h1').innerHTML = 'Real-world occlusion,<br />depth-tested';
@@ -1019,7 +1029,12 @@
             /// live by now, drop the pending request and take VR instead.
             setTimeout(function () {
                 if (app.xr.active) return;
-                console.log('[pcvr] no session after 4s, forcing vr (was ' + sessionType + ')');
+                if (arMode && app.xr.isAvailable(pc.XRTYPE_AR)) {
+                    /// AR is there, we are just waiting for a user gesture
+                    console.log('[pcvr] awaiting user activation, not downgrading');
+                    return;
+                }
+                console.log('[pcvr] no session, falling back to vr (was ' + sessionType + ')');
                 sessionRequested = false;
                 sessionType = pc.XRTYPE_VR;
                 floor.enabled = true;
