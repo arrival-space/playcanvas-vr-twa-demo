@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 65;
+        const BUILD = 66;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -450,7 +450,7 @@
                 lastFrameTime = time;
                 /// refresh the depth handle every frame so the composite samples
                 /// the current frame, not whatever the last readback captured
-                if (eyeOn || occOn || dbgOn) {
+                if (eyeOn || occOn || dbgOn || primeOn) {
                     try { refreshDepthInfo(frame); } catch (e) { depthGateErr = e.message; }
                 }
                 /// the depth texture is opaque: it is only a legal GL object inside
@@ -937,7 +937,7 @@
                 setTimeout(function () {
                     ensureProbes();
                     window.pcvr.occlude(false);
-                    window.pcvr.debug(true);
+                    window.pcvr.prime(true);
                 }, 800);
             }
             hud.classList.add('hidden');
@@ -1711,6 +1711,178 @@
             if (prevScissor) gl.enable(gl.SCISSOR_TEST);
         }
 
+        /// ---- depth prime: the real occluder -----------------------------
+        let primeProg = null;
+        let primeOn = false;
+        let primeBias = 0.02;      // metres; push the real world slightly back
+        let primeLayer = null;
+        let primeAnchor = null;
+        let primeErr = null;
+        let primeDraws = 0;
+
+        function ensurePrimeLayer() {
+            if (primeLayer) return primeLayer;
+            primeLayer = new pc.Layer({ name: 'DepthPrime' });
+            /// index 0 = first render action, so it takes the camera's clear
+            app.scene.layers.insert(primeLayer, 0);
+            const cc = camera.camera;
+            if (cc.layers.indexOf(primeLayer.id) === -1) {
+                cc.layers = [primeLayer.id].concat(cc.layers);
+            }
+            /// a mesh instance so the layer definitely produces a render action.
+            /// It writes nothing - no colour, no depth.
+            const m = new pc.StandardMaterial();
+            m.depthWrite = false;
+            m.depthTest = false;
+            m.redWrite = false;
+            m.greenWrite = false;
+            m.blueWrite = false;
+            m.alphaWrite = false;
+            m.update();
+            primeAnchor = new pc.Entity('depth-prime-anchor');
+            primeAnchor.addComponent('render', {
+                type: 'plane',
+                material: m,
+                layers: [primeLayer.id]
+            });
+            primeAnchor.setLocalScale(0.01, 0.01, 0.01);
+            camera.addChild(primeAnchor);
+            primeAnchor.setLocalPosition(0, 0, -0.5);
+            console.log('[pcvr] depth prime layer inserted at 0');
+            return primeLayer;
+        }
+
+        function initPrimeProg() {
+            const gl = app.graphicsDevice.gl;
+            if (primeProg) return primeProg;
+            const vs = compileShader(gl, gl.VERTEX_SHADER,
+                '#version 300 es\n' +
+                'out vec2 vUv;\n' +
+                'void main() {\n' +
+                '    vec2 q = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n' +
+                '    vUv = q;\n' +
+                '    gl_Position = vec4(q * 2.0 - 1.0, 0.0, 1.0);\n' +
+                '}\n');
+            const fs = compileShader(gl, gl.FRAGMENT_SHADER,
+                '#version 300 es\n' +
+                'precision highp float;\n' +
+                'precision highp sampler2DArray;\n' +
+                'uniform sampler2DArray uDepth;\n' +
+                'uniform float uLayer;\n' +
+                'uniform float uNear;\n' +
+                'uniform float uFar;\n' +
+                'uniform float uP10;\n' +
+                'uniform float uP14;\n' +
+                'uniform float uBias;\n' +
+                'in vec2 vUv;\n' +
+                'out vec4 fragColor;\n' +
+                'void main() {\n' +
+                '    fragColor = vec4(0.0);\n' +
+                '    float raw = texture(uDepth, vec3(vUv, uLayer)).r;\n' +
+                /// no reading -> leave it at the far plane, occlude nothing
+                '    if (raw <= 0.0) { gl_FragDepth = 1.0; return; }\n' +
+                '    float invd = (1.0 / uNear) - raw * ((1.0 / uNear) - (1.0 / uFar));\n' +
+                '    float dm = 1.0 / max(invd, 0.0001) + uBias;\n' +
+                /// sensor metres -> NDC z for THIS eye's projection -> [0,1]
+                '    float zndc = -uP10 + uP14 / max(dm, 0.01);\n' +
+                '    gl_FragDepth = clamp((zndc + 1.0) * 0.5, 0.0, 1.0);\n' +
+                '}\n');
+            if (!vs || !fs) return null;
+            const prog = gl.createProgram();
+            gl.attachShader(prog, vs);
+            gl.attachShader(prog, fs);
+            gl.linkProgram(prog);
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                primeErr = gl.getProgramInfoLog(prog);
+                console.log('[pcvr] prime program link failed: ' + primeErr);
+                return null;
+            }
+            primeProg = {
+                prog: prog,
+                uDepth: gl.getUniformLocation(prog, 'uDepth'),
+                uLayer: gl.getUniformLocation(prog, 'uLayer'),
+                uNear: gl.getUniformLocation(prog, 'uNear'),
+                uFar: gl.getUniformLocation(prog, 'uFar'),
+                uP10: gl.getUniformLocation(prog, 'uP10'),
+                uP14: gl.getUniformLocation(prog, 'uP14'),
+                uBias: gl.getUniformLocation(prog, 'uBias')
+            };
+            console.log('[pcvr] depth prime program ready');
+            return primeProg;
+        }
+
+        function runPrime() {
+            if (!primeOn || !app.xr.active) return;
+            const views = app.xr.views.list;
+            if (!views.length) return;
+            const di0 = lastDiViews[0] || lastDi;
+            if (!di0 || !di0.texture) return;
+            const gl = app.graphicsDevice.gl;
+            const g = initPrimeProg();
+            if (!g) return;
+
+            /// whatever framebuffer PlayCanvas is rendering this layer into is
+            /// exactly the one we want - do NOT rebind anything here
+            gl.bindVertexArray(null);
+            gl.useProgram(g.prog);
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.ALWAYS);
+            gl.depthMask(true);
+            gl.disable(gl.BLEND);
+            gl.disable(gl.CULL_FACE);
+            gl.disable(gl.SCISSOR_TEST);
+            gl.colorMask(false, false, false, false);
+
+            const UNIT = 10;
+            gl.activeTexture(gl.TEXTURE0 + UNIT);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.uniform1i(g.uDepth, UNIT);
+            gl.uniform1f(g.uNear, depthNear);
+            gl.uniform1f(g.uFar, depthFar);
+            gl.uniform1f(g.uBias, primeBias);
+
+            for (let i = 0; i < views.length; i++) {
+                const view = views[i];
+                const di = lastDiViews[i] || di0;
+                if (!di || !di.texture) continue;
+                const vp = view.viewport;
+                const pm = view.projMat && view.projMat.data;
+                gl.viewport(vp.x, vp.y, vp.z, vp.w);
+                gl.bindTexture(gl.TEXTURE_2D_ARRAY, di.texture);
+                const slice = (di.imageIndex !== undefined && di.imageIndex !== null)
+                    ? di.imageIndex : i;
+                gl.uniform1f(g.uLayer, slice);
+                gl.uniform1f(g.uP10, pm ? pm[10] : -1.001);
+                gl.uniform1f(g.uP14, pm ? pm[14] : -0.2001);
+                gl.drawArrays(gl.TRIANGLES, 0, 3);
+            }
+
+            gl.colorMask(true, true, true, true);
+            gl.depthFunc(gl.LESS);
+            primeDraws++;
+
+            /// We changed GL behind the device's back, so its cached state is
+            /// now a lie. Flip each cached value to something else and back so
+            /// the next draw re-applies it for real.
+            const gd = app.graphicsDevice;
+            try {
+                gd.setDepthState(pc.DepthState.WRITEDEPTH);
+                gd.setDepthState(pc.DepthState.DEFAULT);
+                gd.setBlendState(pc.BlendState.ALPHABLEND);
+                gd.setBlendState(pc.BlendState.NOBLEND);
+                gd.setCullMode(pc.CULLFACE_NONE);
+                gd.setCullMode(pc.CULLFACE_BACK);
+            } catch (e) {
+                primeErr = 'state restore: ' + e.message;
+            }
+        }
+
+        app.scene.on('postrender:layer', function (cam, layer, transparent) {
+            if (!primeOn || transparent) return;
+            if (!primeLayer || layer !== primeLayer) return;
+            runPrime();
+        });
+
         app.on('postrender', drawDebug);
 
 
@@ -2134,6 +2306,40 @@
                 if (!splatEntity) return 'not loaded';
                 splatEntity.setLocalEulerAngles(rx || 0, ry || 0, rz || 0);
                 return { euler: [rx || 0, ry || 0, rz || 0] };
+            },
+            /// the real thing: sensor depth straight into the depth buffer,
+            /// before any geometry draws. Meshes and splats both just depth-test.
+            prime: function (v) {
+                primeOn = v === undefined ? true : !!v;
+                if (primeOn) {
+                    ensurePrimeLayer();
+                    /// the screen-space punch would double up on this
+                    dbgOn = false;
+                    occOn = false;
+                    eyeOn = false;
+                    camera.camera.clearDepthBuffer = true;
+                    requestSceneDepth(false);
+                    ensureProbes();
+                }
+                return { prime: primeOn, bias: primeBias, layer: !!primeLayer };
+            },
+            primeBias: function (m) {
+                if (isFinite(m)) primeBias = m;
+                return { bias: primeBias };
+            },
+            primeStat: function () {
+                const ls = app.scene.layers;
+                return {
+                    on: primeOn,
+                    draws: primeDraws,
+                    err: primeErr,
+                    progReady: !!primeProg,
+                    order: ls.layerList.map(function (l, i) {
+                        return l.name + (ls.subLayerList[i] ? ':T' : ':O');
+                    }),
+                    camLayers: camera.camera.layers.slice(),
+                    clearDepth: camera.camera.clearDepthBuffer
+                };
             },
             debug: function (v) {
                 dbgOn = v === undefined ? true : !!v;
