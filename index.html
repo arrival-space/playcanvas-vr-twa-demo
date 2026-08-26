@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 73;
+        const BUILD = 74;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -2820,6 +2820,24 @@
             sharp: function (v) {
                 if (isFinite(v)) sweepSharp = v;
                 return { sharp: sweepSharp };
+            },
+            /// the raw depth map as the sensor actually delivered it
+            grab: function () {
+                readbackOn = true;
+                if (!depthPixels) return { ready: false, note: 'blit has not run yet, call again in ~300ms' };
+                const n = DEPTH_W * DEPTH_H;
+                const bytes = new Uint8Array(n * 2);
+                for (let i = 0; i < n; i++) {
+                    /// blitDepth packs the 16-bit value as hi in R, lo in G
+                    bytes[i * 2] = depthPixels[i * 4];
+                    bytes[i * 2 + 1] = depthPixels[i * 4 + 1];
+                }
+                let bin = '';
+                const CH = 4096;
+                for (let i = 0; i < bytes.length; i += CH) {
+                    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+                }
+                return { ready: true, w: DEPTH_W, h: DEPTH_H, b64: btoa(bin) };
             },
             readback: function (v) {
                 readbackOn = !!v;
