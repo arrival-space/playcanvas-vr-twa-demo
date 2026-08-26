@@ -107,7 +107,7 @@
         /// with that number to actually claim it.
         /// Bumped by hand on every deploy — the only reliable way to tell in the
         /// headset whether you are looking at a fresh build or a cached one.
-        const BUILD = 68;
+        const BUILD = 69;
 
         const urlParams = new URLSearchParams(location.search);
         const scaleParam = parseFloat(urlParams.get('scale'));
@@ -1715,7 +1715,8 @@
         let primeProg = null;
         let primeOn = false;
         let primeBias = 0.02;      // metres; push the real world slightly back
-        let primeSmooth = 3;       // 0 nearest, 1 bilinear, 2 tent, 3 edge-snap
+        let primeSmooth = 2;       // 0 nearest, 1 bilinear, 2 tent, 3 edge-snap, 4 fxaa
+        let primeSubpix = 0.75;    // fxaa sub-pixel aliasing strength
         let primeEdge = 0.01;      // raw units; below this there is no edge to snap to
         let primeLayer = null;
         let primeAnchor = null;
@@ -1778,6 +1779,7 @@
                 'uniform float uBias;\n' +
                 'uniform float uSmooth;\n' +
                 'uniform float uEdgeT;\n' +
+                'uniform float uSubpix;\n' +
                 'uniform vec2 uTexSize;\n' +
                 'in vec2 vUv;\n' +
                 'out vec4 fragColor;\n' +
@@ -1806,8 +1808,88 @@
                 '    if (acc.y <= 0.0001) return vec3(0.0);\n' +
                 '    return vec3(acc.x / acc.y, mn, mx);\n' +
                 '}\n' +
+                'float lumaAt(vec2 uv, float c) {\n' +
+                '    float r = texture(uDepth, vec3(uv, uLayer)).r;\n' +
+                '    return r > 0.0 ? r : c;\n' +
+                '}\n' +
+                'float fxaaDepth(vec2 uv) {\n' +
+                '    vec2 ts = uTexSize;\n' +
+                '    vec2 rcp = 1.0 / ts;\n' +
+                '    float m = texture(uDepth, vec3(uv, uLayer)).r;\n' +
+                '    if (m <= 0.0) return 0.0;\n' +
+                '    float n = lumaAt(uv + vec2(0.0, -rcp.y), m);\n' +
+                '    float s2 = lumaAt(uv + vec2(0.0, rcp.y), m);\n' +
+                '    float e = lumaAt(uv + vec2(rcp.x, 0.0), m);\n' +
+                '    float w = lumaAt(uv + vec2(-rcp.x, 0.0), m);\n' +
+                '    float mx = max(m, max(max(n, s2), max(e, w)));\n' +
+                '    float mn = min(m, min(min(n, s2), min(e, w)));\n' +
+                '    float range = mx - mn;\n' +
+                '    if (range < uEdgeT) return m;\n' +
+                '    float nw = lumaAt(uv + vec2(-rcp.x, -rcp.y), m);\n' +
+                '    float ne = lumaAt(uv + vec2(rcp.x, -rcp.y), m);\n' +
+                '    float sw = lumaAt(uv + vec2(-rcp.x, rcp.y), m);\n' +
+                '    float se = lumaAt(uv + vec2(rcp.x, rcp.y), m);\n' +
+                '    float ns = n + s2;\n' +
+                '    float we = w + e;\n' +
+                '    float nwsw = nw + sw;\n' +
+                '    float nese = ne + se;\n' +
+                '    float nwne = nw + ne;\n' +
+                '    float swse = sw + se;\n' +
+                '    float edgeH = abs(-2.0 * w + nwsw) + abs(-2.0 * m + ns) * 2.0 + abs(-2.0 * e + nese);\n' +
+                '    float edgeV = abs(-2.0 * n + nwne) + abs(-2.0 * m + we) * 2.0 + abs(-2.0 * s2 + swse);\n' +
+                '    bool horz = edgeH >= edgeV;\n' +
+                '    float l1 = horz ? n : w;\n' +
+                '    float l2 = horz ? s2 : e;\n' +
+                '    float g1 = l1 - m;\n' +
+                '    float g2 = l2 - m;\n' +
+                '    bool steep1 = abs(g1) >= abs(g2);\n' +
+                '    float gradScaled = 0.25 * max(abs(g1), abs(g2));\n' +
+                '    float stepLen = horz ? rcp.y : rcp.x;\n' +
+                '    float localAvg = 0.0;\n' +
+                '    if (steep1) { stepLen = -stepLen; localAvg = 0.5 * (l1 + m); }\n' +
+                '    else { localAvg = 0.5 * (l2 + m); }\n' +
+                '    vec2 cuv = uv;\n' +
+                '    if (horz) cuv.y += stepLen * 0.5; else cuv.x += stepLen * 0.5;\n' +
+                '    vec2 off = horz ? vec2(rcp.x, 0.0) : vec2(0.0, rcp.y);\n' +
+                '    vec2 uv1 = cuv - off;\n' +
+                '    vec2 uv2 = cuv + off;\n' +
+                '    float end1 = lumaAt(uv1, m) - localAvg;\n' +
+                '    float end2 = lumaAt(uv2, m) - localAvg;\n' +
+                '    bool done1 = abs(end1) >= gradScaled;\n' +
+                '    bool done2 = abs(end2) >= gradScaled;\n' +
+                '    if (!done1) uv1 -= off;\n' +
+                '    if (!done2) uv2 += off;\n' +
+                '    if (!(done1 && done2)) {\n' +
+                '        for (int i = 2; i < 12; i++) {\n' +
+                '            float q = (i < 5) ? 1.0 : ((i < 7) ? 1.5 : ((i < 9) ? 2.0 : 4.0));\n' +
+                '            if (!done1) { end1 = lumaAt(uv1, m) - localAvg; done1 = abs(end1) >= gradScaled; }\n' +
+                '            if (!done2) { end2 = lumaAt(uv2, m) - localAvg; done2 = abs(end2) >= gradScaled; }\n' +
+                '            if (done1 && done2) break;\n' +
+                '            if (!done1) uv1 -= off * q;\n' +
+                '            if (!done2) uv2 += off * q;\n' +
+                '        }\n' +
+                '    }\n' +
+                '    float d1 = horz ? (uv.x - uv1.x) : (uv.y - uv1.y);\n' +
+                '    float d2 = horz ? (uv2.x - uv.x) : (uv2.y - uv.y);\n' +
+                '    bool near1 = d1 < d2;\n' +
+                '    float dFinal = min(d1, d2);\n' +
+                '    float thick = d1 + d2;\n' +
+                '    float pixOff = -dFinal / max(thick, 1e-6) + 0.5;\n' +
+                '    bool centreSmaller = m < localAvg;\n' +
+                '    bool ok = ((near1 ? end1 : end2) < 0.0) != centreSmaller;\n' +
+                '    float finalOff = ok ? pixOff : 0.0;\n' +
+                '    float avg = (1.0 / 12.0) * (2.0 * (ns + we) + nwsw + nese);\n' +
+                '    float sp1 = clamp(abs(avg - m) / max(range, 1e-6), 0.0, 1.0);\n' +
+                '    float sp2 = (-2.0 * sp1 + 3.0) * sp1 * sp1;\n' +
+                '    finalOff = max(finalOff, sp2 * sp2 * uSubpix);\n' +
+                '    vec2 fuv = uv;\n' +
+                '    if (horz) fuv.y += finalOff * stepLen; else fuv.x += finalOff * stepLen;\n' +
+                '    float r = texture(uDepth, vec3(fuv, uLayer)).r;\n' +
+                '    return r > 0.0 ? r : m;\n' +
+                '}\n' +
                 'float sampleRaw(vec2 uv) {\n' +
                 '    if (uSmooth < 0.5) return texture(uDepth, vec3(uv, uLayer)).r;\n' +
+                '    if (uSmooth > 3.5) return fxaaDepth(uv);\n' +
                 '    if (uSmooth > 1.5 && uSmooth < 2.5) {\n' +
                 /// wider tent, for comparison
                 '        vec2 ts = uTexSize;\n' +
@@ -1866,6 +1948,7 @@
                 uBias: gl.getUniformLocation(prog, 'uBias'),
                 uSmooth: gl.getUniformLocation(prog, 'uSmooth'),
                 uEdgeT: gl.getUniformLocation(prog, 'uEdgeT'),
+                uSubpix: gl.getUniformLocation(prog, 'uSubpix'),
                 uTexSize: gl.getUniformLocation(prog, 'uTexSize')
             };
             console.log('[pcvr] depth prime program ready');
@@ -1903,6 +1986,7 @@
             gl.uniform1f(g.uBias, primeBias);
             gl.uniform1f(g.uSmooth, primeSmooth);
             gl.uniform1f(g.uEdgeT, primeEdge);
+            gl.uniform1f(g.uSubpix, primeSubpix);
             gl.uniform2f(g.uTexSize, di0.width || DEPTH_W, di0.height || DEPTH_H);
 
             for (let i = 0; i < views.length; i++) {
@@ -2396,9 +2480,15 @@
                 return {
                     smooth: primeSmooth,
                     meaning: ['nearest (blocky)', 'bilinear (smooth, has a skirt)',
-                              'bilinear + 3x3 tent', 'edge-snap (FXAA-flavoured)'][primeSmooth] || '?',
-                    edgeThreshold: primeEdge
+                              'bilinear + 3x3 tent', 'edge-snap (FXAA-flavoured)',
+                              'FXAA (edge search + resample)'][primeSmooth] || '?',
+                    edgeThreshold: primeEdge,
+                    subpix: primeSubpix
                 };
+            },
+            subpix: function (v) {
+                if (isFinite(v)) primeSubpix = v;
+                return { subpix: primeSubpix };
             },
             smoothEdge: function (t) {
                 if (isFinite(t)) primeEdge = t;
